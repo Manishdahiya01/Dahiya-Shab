@@ -16,6 +16,8 @@ def admin_home(settings: dict[str, Any]) -> InlineKeyboardMarkup:
              InlineKeyboardButton("📣 Force Subscribe", callback_data="adm:subscription")],
             [InlineKeyboardButton("🔎 User Search Requests", callback_data="adm:requests:0"),
              InlineKeyboardButton("📢 Broadcast", callback_data="adm:broadcast")],
+            [InlineKeyboardButton("👨‍👩‍👧 Bot Groups", callback_data="adm:groups"),
+             InlineKeyboardButton("🧾 Duplicate Files", callback_data="adm:duplicates")],
             [InlineKeyboardButton("⏱ Timers & Countdown", callback_data="adm:timers"),
              InlineKeyboardButton("⚙️ Settings", callback_data="adm:settings")],
             [InlineKeyboardButton("🧹 Database Cleanup", callback_data="adm:cleanup")],
@@ -40,6 +42,7 @@ def settings_menu(settings: dict[str, Any]) -> InlineKeyboardMarkup:
              InlineKeyboardButton("Bot description", callback_data="adm:description")],
             [InlineKeyboardButton("Welcome message", callback_data="adm:welcome"),
              InlineKeyboardButton("Welcome button", callback_data="adm:welcome_button")],
+            [InlineKeyboardButton("Powered by branding", callback_data="adm:powered_by")],
             [InlineKeyboardButton("Bot reply buttons", callback_data="adm:reply_buttons")],
             [InlineKeyboardButton("Movie-not-found", callback_data="adm:notfound")],
             [InlineKeyboardButton(timer_label, callback_data="adm:toggle_autodelete"),
@@ -84,6 +87,7 @@ def source_list(
             )],
             [InlineKeyboardButton("Add index group/channel", callback_data="adm:add_source")],
             [InlineKeyboardButton("Start old-file indexing", callback_data="adm:old_index")],
+            [InlineKeyboardButton("Indexing progress", callback_data="adm:index_status")],
             [InlineKeyboardButton("Back", callback_data="adm:home")],
         ]
     )

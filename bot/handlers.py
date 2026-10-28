@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Any
@@ -14,6 +15,7 @@ from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -261,9 +263,13 @@ async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, db: 
         return
 
     query = context.user_data.get("last_search", "")
-    header = (
-        f"<b>Results for:</b> {escape(str(query)[:120])}\n"
-        f"Found {len(hits)} indexed file(s). Select a file or filter:\n\n"
+    settings = await db.get_settings()
+    header = _result_header(
+        str(query),
+        str(context.user_data.get("search_requested_by") or "Unknown"),
+        float(context.user_data.get("search_elapsed_seconds") or 0),
+        len(hits),
+        str(settings.get("powered_by") or "Dahiya Movie Store | Search Zone"),
     )
     lines = []
     used_chars = len(header)
@@ -296,7 +302,25 @@ async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, db: 
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
-    await _schedule_result_auto_delete(context, db, result_message, await db.get_settings())
+    await _schedule_result_auto_delete(context, db, result_message, settings)
+
+
+def _result_header(
+    query: str,
+    requested_by: str,
+    elapsed_seconds: float,
+    total: int,
+    powered_by: str,
+) -> str:
+    return (
+        "✨ <b>THE RESULTS FOR</b> ✨\n"
+        f"🏷️ <b>{escape(query[:120])}</b>\n"
+        f"👤 <b>Requested By:</b> {escape(requested_by[:80])}\n"
+        f"⚡ <b>Result shown in:</b> {max(0.0, elapsed_seconds):.2f} seconds\n"
+        f"⭐ <b>Powered by:</b> {escape(powered_by[:120])}\n"
+        "🔍 <b>Search Zone</b>\n"
+        f"<i>{total} indexed file(s) found. Select a file or filter.</i>\n\n"
+    )
 
 
 async def _run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database, query: str) -> None:
@@ -304,6 +328,7 @@ async def _run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Da
     if not query:
         await update.effective_message.reply_text("Send a movie or series name to search.")
         return
+    started = time.perf_counter()
     await db.register_member(update.effective_user)
     await db.record_request(update.effective_user, query)
     settings = await db.get_settings()
@@ -311,9 +336,19 @@ async def _run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Da
         query,
         fuzzy_enabled=settings.get("fuzzy_search_enabled", True),
     )
+    user = update.effective_user
+    requested_by = (
+        " ".join(filter(None, [user.first_name, user.last_name]))
+        or user.username
+        or str(user.id)
+        if user
+        else "Unknown"
+    )
     context.user_data["last_search"] = query
     context.user_data["search_hits"] = hits
     context.user_data["search_filters"] = {}
+    context.user_data["search_requested_by"] = requested_by
+    context.user_data["search_elapsed_seconds"] = time.perf_counter() - started
     await _send_results(update, context, db)
 
 
@@ -445,6 +480,122 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         rows_markup.append([InlineKeyboardButton("Back", callback_data="adm:home")])
         text = f"🔎 USER SEARCH REQUESTS · {stats['requests']} total\n\n" + ("\n".join(lines) if lines else "No requests yet.")
         await query.edit_message_text(text[:3900], reply_markup=InlineKeyboardMarkup(rows_markup))
+    elif data == "adm:groups":
+        groups = await db.get_bot_groups()
+        rows = [
+            [InlineKeyboardButton(
+                f"Leave {item.get('title') or item['chat_id']}"[:55],
+                callback_data=f"adm:group_leave_confirm:{item['chat_id']}",
+            )]
+            for item in groups[:20]
+        ]
+        rows.append([InlineKeyboardButton("Back", callback_data="adm:home")])
+        text = (
+            "👨‍👩‍👧 BOT GROUPS\nChoose a group to remove the bot from."
+            if groups
+            else "The bot has not recorded any groups yet."
+        )
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
+    elif data.startswith("adm:group_leave_confirm:"):
+        chat_id = data.rsplit(":", 1)[1]
+        await query.edit_message_text(
+            f"Remove the bot from group {chat_id}?",
+            reply_markup=InlineKeyboardMarkup(
+                [[
+                    InlineKeyboardButton("Confirm leave", callback_data=f"adm:group_leave:{chat_id}"),
+                    InlineKeyboardButton("Cancel", callback_data="adm:groups"),
+                ]]
+            ),
+        )
+    elif data.startswith("adm:group_leave:"):
+        chat_id = data.rsplit(":", 1)[1]
+        try:
+            await context.bot.leave_chat(int(chat_id))
+            await db.remove_bot_group(chat_id)
+            result = "The bot left the group."
+        except TelegramError:
+            logger.exception("Could not leave bot group %s.", chat_id)
+            result = "Telegram could not remove the bot from that group."
+        await query.edit_message_text(
+            result,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="adm:groups")]]),
+        )
+    elif data == "adm:duplicates":
+        groups = await db.duplicate_groups()
+        if not groups:
+            await query.edit_message_text(
+                "🧾 DUPLICATE FILES\nNo duplicate file IDs were found in the current index.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="adm:home")]]),
+            )
+        else:
+            lines = []
+            rows = []
+            for group in groups[:10]:
+                files = group.get("files") or []
+                keeper = files[0] if files else {}
+                lines.append(
+                    f"• {keeper.get('filename') or keeper.get('title') or 'File'} — {group.get('count', 0)} copies"
+                )
+                for item in files[1:4]:
+                    rows.append(
+                        [InlineKeyboardButton(
+                            f"Review duplicate: {item.get('filename') or item.get('title') or 'file'}"[:60],
+                            callback_data=f"adm:dupe_confirm:{item.get('file_key', '')}",
+                        )]
+                    )
+            rows.append([InlineKeyboardButton("Back", callback_data="adm:home")])
+            await query.edit_message_text(
+                "🧾 DUPLICATE FILES\nRemoving an entry only removes it from this bot's index; "
+                "the original Telegram message remains.\n\n" + "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+    elif data.startswith("adm:dupe_confirm:"):
+        file_key = data[len("adm:dupe_confirm:"):]
+        item = await db.get_movie(file_key)
+        if not item:
+            await query.edit_message_text(
+                "That indexed file is no longer available.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="adm:duplicates")]]),
+            )
+        else:
+            label = item.get("filename") or item.get("title") or file_key
+            await query.edit_message_text(
+                f"Remove this duplicate from the bot index?\n\n{escape(str(label)[:300])}\n\n"
+                "The original Telegram message will not be deleted.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Confirm remove", callback_data=f"adm:dupe_delete:{file_key}"),
+                      InlineKeyboardButton("Cancel", callback_data="adm:duplicates")]]
+                ),
+                parse_mode="HTML",
+            )
+    elif data.startswith("adm:dupe_delete:"):
+        file_key = data[len("adm:dupe_delete:"):]
+        removed = await db.delete_movie_index(file_key)
+        await query.edit_message_text(
+            "Duplicate index entry removed." if removed else "That index entry was already removed.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back to duplicates", callback_data="adm:duplicates")]]),
+        )
+    elif data == "adm:index_status":
+        sources = await db.get_sources()
+        lines = []
+        for source in sources[:30]:
+            job = await db.get_latest_index_job(source["chat_id"])
+            title = source.get("title") or source["chat_id"]
+            if job:
+                line = f"• {title}: {job.get('status', 'unknown')} — {job.get('indexed', 0)} files"
+                if job.get("error"):
+                    line += f" — {job['error'][:100]}"
+            else:
+                line = f"• {title}: no historical scan recorded"
+            lines.append(line)
+        text = "📈 INDEXING PROGRESS\n" + ("\n".join(lines) if lines else "No index sources configured.")
+        await query.edit_message_text(
+            text[:3900],
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔄 Refresh", callback_data="adm:index_status")],
+                 [InlineKeyboardButton("Back", callback_data="adm:sources")]]
+            ),
+        )
     elif data == "adm:cleanup":
         expired = await db.expired_delivery_count(utc_now())
         await query.edit_message_text(
@@ -562,6 +713,22 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         await _prompt(update, context, "description", "Send the new bot description (up to 512 characters).")
     elif data == "adm:photo":
         await _prompt(update, context, "photo", "Send a JPG/PNG photo. It will update the bot profile and the welcome image.")
+    elif data == "adm:powered_by":
+        current = settings.get("powered_by") or "Dahiya Movie Store | Search Zone"
+        await query.edit_message_text(
+            f"Current Powered by text:\n\n{escape(str(current))}",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Edit Powered by", callback_data="adm:edit_powered_by")],
+                 [InlineKeyboardButton("Reset", callback_data="adm:reset_powered_by")],
+                 [InlineKeyboardButton("Back", callback_data="adm:settings")]]
+            ),
+            parse_mode="HTML",
+        )
+    elif data == "adm:edit_powered_by":
+        await _prompt(update, context, "powered_by", "Send the Powered by text (up to 120 characters).")
+    elif data == "adm:reset_powered_by":
+        await db.update_settings({"powered_by": "Dahiya Movie Store | Search Zone"})
+        await query.edit_message_text("Powered by text reset.", reply_markup=settings_menu(await db.get_settings()))
     elif data == "adm:welcome":
         current = settings.get("welcome_message") or "Send a movie or series name to search the indexed files."
         await query.edit_message_text(
@@ -727,7 +894,14 @@ async def _handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if not state:
         return False
     text = (update.effective_message.text or "").strip()
-    if state == "description":
+    if state == "powered_by":
+        if not text or len(text) > 120:
+            await update.effective_message.reply_text("Send Powered by text between 1 and 120 characters.")
+            return True
+        await db.update_settings({"powered_by": text})
+        context.user_data.pop("admin_state", None)
+        await update.effective_message.reply_text("Powered by text updated.", reply_markup=settings_menu(await db.get_settings()))
+    elif state == "description":
         if len(text) > 512:
             await update.effective_message.reply_text("Description is too long. Send no more than 512 characters.")
             return True
@@ -941,9 +1115,38 @@ async def channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _save_new_source_message(message, db)
 
 
-async def group_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def bot_membership_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    change = update.my_chat_member
+    if not change:
+        return
     db, _, _ = _services(context)
-    await _save_new_source_message(update.effective_message, db)
+    status = change.new_chat_member.status
+    if status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
+        await db.save_bot_group(
+            change.chat.id,
+            change.chat.title or change.chat.username or str(change.chat.id),
+            change.chat.type,
+        )
+    elif status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+        await db.remove_bot_group(change.chat.id)
+
+
+async def group_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db, _, admins = _services(context)
+    message = update.effective_message
+    if not message:
+        return
+    user = update.effective_user
+    if message.text and not message.text.startswith("/") and user and not user.is_bot:
+        settings = await db.get_settings()
+        if not settings.get("bot_enabled", True) and not _is_admin(user.id, admins):
+            return
+        if not _is_admin(user.id, admins) and not await _is_subscribed(update, context, db):
+            await _show_join_gate(update, context, db)
+            return
+        await _run_search(update, context, db, message.text)
+        return
+    await _save_new_source_message(message, db)
 
 
 async def _save_new_source_message(message: Any, db: Database) -> None:
@@ -1134,6 +1337,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CallbackQueryHandler(callback_router))
     application.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, private_photo))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, private_text))
+    application.add_handler(ChatMemberHandler(bot_membership_update, ChatMemberHandler.MY_CHAT_MEMBER))
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL, channel_post))
     application.add_handler(MessageHandler(filters.ChatType.GROUPS, group_post))
     application.add_error_handler(error_handler)

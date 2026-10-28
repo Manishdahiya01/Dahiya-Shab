@@ -20,6 +20,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "subscription": {"enabled": False},
     "new_indexing_enabled": True,
     "fuzzy_search_enabled": True,
+    "powered_by": "Dahiya Movie Store | Search Zone",
     "welcome_message": "Send a movie or series name to search the indexed files.",
     "welcome_button": None,
     "custom_reply_buttons": [],
@@ -57,6 +58,7 @@ class Database:
         self.movies = self.db.movie_index
         self.deliveries = self.db.pending_deletions
         self.index_jobs = self.db.index_jobs
+        self.bot_groups = self.db.bot_groups
 
     async def connect(self) -> None:
         await self.client.admin.command("ping")
@@ -78,6 +80,7 @@ class Database:
         await self.movies.create_index([("normalized_title", ASCENDING), ("year", ASCENDING)])
         await self.deliveries.create_index("expires_at")
         await self.index_jobs.create_index([("chat_id", ASCENDING), ("started_at", DESCENDING)])
+        await self.bot_groups.create_index("chat_id", unique=True)
         logger.info("MongoDB connection established and indexes are ready.")
 
     async def close(self) -> None:
@@ -262,6 +265,34 @@ class Database:
     async def get_movie(self, file_key: str) -> dict[str, Any] | None:
         return await self.movies.find_one({"file_key": file_key})
 
+    async def duplicate_groups(self, limit: int = 20) -> list[dict[str, Any]]:
+        pipeline = [
+            {"$match": {"file_unique_id": {"$type": "string", "$ne": ""}}},
+            {"$sort": {"indexed_at": ASCENDING}},
+            {
+                "$group": {
+                    "_id": "$file_unique_id",
+                    "count": {"$sum": 1},
+                    "files": {
+                        "$push": {
+                            "file_key": "$file_key",
+                            "filename": "$filename",
+                            "title": "$title",
+                            "source_title": "$source_title",
+                        }
+                    },
+                }
+            },
+            {"$match": {"count": {"$gt": 1}}},
+            {"$sort": {"count": DESCENDING}},
+            {"$limit": max(1, min(limit, 100))},
+        ]
+        return await self.movies.aggregate(pipeline).to_list(length=max(1, min(limit, 100)))
+
+    async def delete_movie_index(self, file_key: str) -> bool:
+        result = await self.movies.delete_one({"file_key": file_key})
+        return result.deleted_count > 0
+
     async def all_members(self, offset: int = 0, limit: int = 15) -> list[dict[str, Any]]:
         return await self.members.find().sort("last_seen", DESCENDING).skip(offset).limit(limit).to_list(length=limit)
 
@@ -341,6 +372,27 @@ class Database:
 
     async def get_latest_index_job(self, chat_id: int | str) -> dict[str, Any] | None:
         return await self.index_jobs.find_one({"chat_id": str(chat_id)}, sort=[("started_at", DESCENDING)])
+
+    async def save_bot_group(self, chat_id: int | str, title: str, chat_type: str) -> None:
+        await self.bot_groups.update_one(
+            {"chat_id": str(chat_id)},
+            {
+                "$set": {
+                    "chat_id": str(chat_id),
+                    "title": title[:160],
+                    "type": chat_type,
+                    "updated_at": utc_now(),
+                }
+            },
+            upsert=True,
+        )
+
+    async def get_bot_groups(self) -> list[dict[str, Any]]:
+        return await self.bot_groups.find().sort("title", ASCENDING).to_list(length=500)
+
+    async def remove_bot_group(self, chat_id: int | str) -> bool:
+        result = await self.bot_groups.delete_one({"chat_id": str(chat_id)})
+        return result.deleted_count > 0
 
 
 def re_escape(value: str) -> str:

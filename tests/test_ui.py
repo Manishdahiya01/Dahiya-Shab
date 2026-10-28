@@ -1,5 +1,5 @@
-from bot.handlers import _result_line, _welcome_keyboard
-from bot.keyboards import admin_home, page_picker_keyboard, results_keyboard
+from bot.handlers import _result_header, _result_line, _welcome_keyboard
+from bot.keyboards import admin_home, page_picker_keyboard, results_keyboard, settings_menu, source_list
 
 
 def test_result_file_name_is_a_blue_telegram_post_link() -> None:
@@ -52,7 +52,54 @@ def test_admin_home_exposes_requested_sections() -> None:
     ]
     assert {"adm:dashboard", "adm:sources", "adm:live", "adm:subscription",
             "adm:requests:0", "adm:broadcast", "adm:timers", "adm:settings",
-            "adm:cleanup"} <= set(callbacks)
+            "adm:cleanup", "adm:groups", "adm:duplicates"} <= set(callbacks)
+
+
+def test_result_header_shows_requester_timing_and_admin_branding() -> None:
+    header = _result_header("KGF", "Varun", 1.07, 11, "Daya Movie Store")
+    assert "KGF" in header
+    assert "Varun" in header
+    assert "1.07 seconds" in header
+    assert "Daya Movie Store" in header
+
+
+def test_result_header_escapes_user_supplied_html() -> None:
+    header = _result_header("<KGF>", "A&B", 0.5, 1, "<brand>")
+    assert "&lt;KGF&gt;" in header
+    assert "A&amp;B" in header
+    assert "&lt;brand&gt;" in header
+
+
+def test_admin_menus_expose_brand_and_index_progress_controls() -> None:
+    settings_callbacks = [
+        button.callback_data
+        for row in settings_menu({"powered_by": "Test"}).inline_keyboard
+        for button in row
+        if button.callback_data
+    ]
+    source_callbacks = [
+        button.callback_data
+        for row in source_list([], True).inline_keyboard
+        for button in row
+        if button.callback_data
+    ]
+    assert "adm:powered_by" in settings_callbacks
+    assert "adm:index_status" in source_callbacks
+
+
+def test_result_header_shows_requester_timing_and_admin_branding() -> None:
+    header = _result_header("KGF", "Varun", 1.07, 11, "Daya Movie Store")
+    assert "KGF" in header
+    assert "Varun" in header
+    assert "1.07 seconds" in header
+    assert "Daya Movie Store" in header
+
+
+def test_result_header_escapes_user_supplied_html() -> None:
+    header = _result_header("<KGF>", "A&B", 0.5, 1, "<brand>")
+    assert "&lt;KGF&gt;" in header
+    assert "A&amp;B" in header
+    assert "&lt;brand&gt;" in header
 
 
 def test_admin_welcome_has_no_slash_admin_command() -> None:

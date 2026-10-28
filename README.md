@@ -18,9 +18,12 @@ The ZIP contains **18 files**:
 
 ## What works
 
-- `/start` and movie/series text search against the MongoDB index; fuzzy fallback can be switched on/off.
+- `/start` and movie/series text search against the MongoDB index in private chats and groups; fuzzy fallback can be switched on/off.
 - Clickable source-post links, inline filters for language, year, quality, episode, and season; Send All copies up to 10 matching files, with page picker and navigation.
+- Results show the requester, measured search time, and admin-editable Powered by text.
 - Admin-only **Admin Panel** button on `/start` (the `/admin` command remains available): dashboard, recent activity/requests, members, index sources, old-file scan, settings, and broadcast.
+- Bot Groups records groups the bot joins and offers a confirmed Leave action. Duplicate Files identifies repeated Telegram file IDs and removes only an index entry after confirmation.
+- Index Sources includes a refreshable progress view for historical scans.
 - Bot profile image/description, custom welcome message and URL button, custom reply buttons, and not-found message/URL button can be managed in Settings.
 - Auto-delete can be switched on/off, set to 30 seconds, 2 minutes, 5 minutes, or a custom time. A live countdown starts when results are sent; pending deletion timers are stored in MongoDB.
 - Force-subscription can be switched on/off; channels can be added and removed.
@@ -93,7 +96,11 @@ The service listens on `PORT` (default `10000`) and exposes `http://localhost:10
 
 - `/admin` opens the control panel. Only IDs in `ADMIN_USER_IDS` can use it.
 - **Settings** contains the profile image/description, welcome message/buttons, fuzzy search, auto-delete, new-indexing, subscription, and not-found message/button controls.
+- **Settings** also controls the Powered by line shown on search results.
 - **Index Sources** adds/removes sources, toggles new-file indexing, and starts old-file scans. Removing a source does not delete its existing movie records.
+- **Indexing progress** refreshes the latest per-source historical scan counts.
+- **Bot Groups** lists groups the bot has reported joining and can leave a group after confirmation.
+- **Duplicate Files** lists repeated Telegram file IDs; removing one deletes only the bot's index record, not the original Telegram message.
 - **Index old files** scans a registered source's message history.
 - **Members** displays registered members, their Telegram ID, request count, and most recent request.
 - **Broadcast** sends text and turns a supplied http/https URL into a clickable button.
