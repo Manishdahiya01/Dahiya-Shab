@@ -54,7 +54,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# --- Callback Query Handler ---
+# --- Callback Query Handler (Nested Sub-Menus & Actions) ---
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -77,15 +77,15 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_index_keyboard(),
             parse_mode="Markdown"
         )
+    elif data == "index_new":
+        await query.edit_message_text(
+            "🆕 **New Files Index (Auto)**\nAuto-indexing is active for connected channels.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]])
+        )
     elif data == "index_old":
         context.user_data["admin_state"] = "waiting_for_old_index"
         await query.message.reply_text(
             "📁 **Old Indexing Setup**\n\nKripya target channel ki Chat ID ya message range bhejiye (jaise: `-100123456789:1:5000`):"
-        )
-    elif data == "index_new":
-        await query.message.reply_text(
-            "🆕 **New Files Index (Auto)**\nAuto-indexing is active for connected channels.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]])
         )
     elif data == "index_add_group":
         context.user_data["admin_state"] = "waiting_for_add_group"
@@ -93,6 +93,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "index_rem_group":
         context.user_data["admin_state"] = "waiting_for_rem_group"
         await query.message.reply_text("➖ Jiss group ko remove karna hai, uski Chat ID bhejiye:")
+    
     elif data == "admin_settings":
         await query.edit_message_text(
             "⚙️ **Bot Settings & Customization**\nManage texts, timers, and links:",
@@ -115,6 +116,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("❌ Naya 'Movie Not Found' custom message bhejiye:")
     elif data == "toggle_fuzzy":
         await query.answer("🔍 Fuzzy Search setting toggled successfully!", show_alert=True)
+    
     elif data == "admin_live_users":
         await query.edit_message_text(
             "👥 **Live Users Panel**\nActive users currently interacting with bot.",
@@ -147,16 +149,16 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await query.edit_message_text(
-            "⚠️ Feature action completed.",
+            "⚠️ Action completed.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]])
         )
 
-# --- Text Message Handler (State Isolation & Input Saving) ---
+# --- Text Message Handler (State Isolation to Prevent Search Errors) ---
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     admin_state = context.user_data.get("admin_state")
 
-    # State-based Admin Inputs (Prevents "Movie Not Found" error)
+    # Isolate admin inputs so they don't trigger "Movie Not Found"
     if admin_state == "waiting_for_powered_by":
         context.user_data["admin_state"] = None
         await update.message.reply_text(f"✅ Powered By text successfully updated to:\n`{text}`", parse_mode="Markdown")
@@ -199,7 +201,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Normal Movie Search Logic (Jab koi admin state active na ho)
     await update.message.reply_text(
-        f"❌ Yeh movie hamare database mein nahi hai.\n\nMovie Searched: {text}\n\n➕ Request Movie / Custom Link"
+        f"❌ Yeh movie hamare database mein nahi hai.\n\nMovie Searched: {text}\n\n➕ Request Movie / Custom Link",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("VIEW CHANNEL", url="https://t.me/your_channel_link")]])
     )
 
 # --- Setup / Register Handlers ---
