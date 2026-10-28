@@ -3,7 +3,7 @@ import logging
 import asyncio
 from aiohttp import web
 from telegram.ext import Application
-from bot.config import TOKEN
+from bot.config import BOT_TOKEN, MONGO_URI
 from bot.database import init_db
 
 # Logging setup
@@ -13,8 +13,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 async def health_check(request):
-    """Render ke port check ke liye simple web server endpoint"""
-    return web.Response(text="Dahiya-Shab Bot is running live!")
+    """Render port requirement ko satisfy karne ke liye simple web response"""
+    return web.Response(text="Dahiya-Shab Bot is active and running!")
 
 async def start_web_server():
     """Aiohttp web server start karta hai jo Render ke PORT par listen karega"""
@@ -25,6 +25,7 @@ async def start_web_server():
     runner = web.AppRunner(app)
     await runner.setup()
     
+    # Render khud ek PORT deta hai, default 10000 rakha hai
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
@@ -36,12 +37,8 @@ async def main():
     await init_db()
     logger.info("Database and Bot initialized successfully.")
 
-    # Telegram Bot Application setup
-    application = Application.builder().token(TOKEN).build()
-
-    # Yahan apne handlers add kar lena agar alag se hain, jaise:
-    # from bot.handlers import setup_handlers
-    # setup_handlers(application)
+    # Telegram Bot Application setup (tera original BOT_TOKEN use ho raha hai)
+    application = Application.builder().token(BOT_TOKEN).build()
 
     # Aiohttp Web Server aur Telegram Polling ko ek sath background mein chalana
     await start_web_server()
@@ -51,7 +48,7 @@ async def main():
     await application.start()
     await application.updater.start_polling()
 
-    # Infinite loop taaki application band na ho
+    # Infinite loop taaki application band na ho aur port open rahe
     stop_event = asyncio.Event()
     await stop_event.wait()
 
