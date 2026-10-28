@@ -1,8 +1,8 @@
 # Dahiya Movie Store Bot
 
-Telegram movie/series search bot with MongoDB-backed file indexing, inline filters, an admin panel, broadcast tools, membership checks, and configurable auto-delete.
+Telegram movie/series search bot with MongoDB-backed file indexing, blue clickable links to indexed Telegram posts, inline filters, an admin panel, broadcast tools, membership checks, and configurable auto-delete.
 
-The provided video shows a Telegram inline-keyboard flow. This project uses the same kind of clickable Telegram buttons for language, year, quality, season, file selection, next/previous, and back navigation.
+Search results show each indexed file as a clickable Telegram post link. Inline buttons below the results provide Send All, language/year/quality/episode/season filters, page selection, and navigation.
 
 ## Project files
 
@@ -18,13 +18,16 @@ The ZIP contains **18 files**:
 
 ## What works
 
-- `/start` and movie/series text search against the MongoDB index.
-- Inline filters for language, year, quality, and season; file buttons, send-all (up to 10), and page navigation.
-- Admin panel at `/admin`: bot on/off, live counts, member list with IDs and latest requests, source groups, old-file scan, settings, and broadcast.
-- Bot profile image and description can be updated from Settings. The image is also used on the welcome message.
-- Movie-not-found text can be changed or reset.
-- Auto-delete can be switched on/off, set to 30 seconds, 2 minutes, 5 minutes, or a custom time. A countdown message refreshes while the timer runs. Pending deletion timers are stored in MongoDB.
+- `/start` and movie/series text search against the MongoDB index in private chats and groups; fuzzy fallback can be switched on/off.
+- Clickable source-post links, inline filters for language, year, quality, episode, and season; Send All copies up to 10 matching files, with page picker and navigation.
+- Results show the requester, measured search time, and admin-editable Powered by text.
+- Admin-only **Admin Panel** button on `/start` (the `/admin` command remains available): dashboard, recent activity/requests, members, index sources, old-file scan, settings, and broadcast.
+- Bot Groups records groups the bot joins and offers a confirmed Leave action. Duplicate Files identifies repeated Telegram file IDs and removes only an index entry after confirmation.
+- Index Sources includes a refreshable progress view for historical scans.
+- Bot profile image/description, custom welcome message and URL button, custom reply buttons, and not-found message/URL button can be managed in Settings.
+- Auto-delete can be switched on/off, set to 30 seconds, 2 minutes, 5 minutes, or a custom time. A live countdown starts when results are sent; pending deletion timers are stored in MongoDB.
 - Force-subscription can be switched on/off; channels can be added and removed.
+- Database Cleanup only removes expired result/delivery messages after admin confirmation; it does not delete the movie index or member records.
 - New channel posts are indexed when new indexing is enabled.
 - Old channel messages are scanned with a Telegram user session. Re-scanning updates the same channel/message records rather than creating duplicates.
 - The movie index and settings live in MongoDB. Restarting or deploying new code does not clear indexed files.
@@ -35,7 +38,7 @@ The ZIP contains **18 files**:
 You need:
 
 1. A Telegram bot token from BotFather.
-2. A MongoDB Atlas connection URI. The Atlas database user must have read/write access, and Atlas Network Access must permit connections from Render (commonly `0.0.0.0/0` with a strong database password).
+2. A MongoDB Atlas connection URI. The Atlas database user must have read/write access. In Atlas Network Access, allow the outbound IP ranges shown for the Render service; avoid opening access to every IP.
 3. Your numeric Telegram user ID for `ADMIN_USER_IDS`.
 4. For old-file indexing only: Telegram API ID, API hash, and a Telethon session string. The session account must already be a member of each source channel/group.
 5. Add the bot as an administrator in each source channel/group so it can see new channel posts and copy indexed files. The bot also needs admin rights in required subscription channels for membership checks.
@@ -60,7 +63,7 @@ Do not put real credentials in this folder, GitHub, the ZIP, or a chat message.
    - `TELETHON_SESSION` — optional for normal search/new indexing; required for old-file scans
    - `MONGODB_DATABASE` — optional; defaults to `dahiya_movie_store`
 5. Deploy and wait for `/health` to return `{"status":"ok",...}`.
-6. Open the bot, send `/start`, then `/admin`. Configure source channels and settings with the inline buttons.
+6. Open the bot and send `/start`. Admins get an **Admin Panel** button; `/admin` is still available as a fallback. Configure source channels and settings with the inline buttons.
 7. To index old files, use Settings/Index old files after the user session is configured. The bot account and the Telethon user account both need access to the source.
 8. For UptimeRobot, monitor `https://YOUR-RENDER-SERVICE.onrender.com/health`. This checks availability; it does not make a free Render service stay awake. For continuous 24/7 operation, use an always-on paid Render instance (the included Blueprint uses `starter`).
 
@@ -92,11 +95,15 @@ The service listens on `PORT` (default `10000`) and exposes `http://localhost:10
 ## Admin panel actions
 
 - `/admin` opens the control panel. Only IDs in `ADMIN_USER_IDS` can use it.
-- **Settings** contains the profile image/description, auto-delete, timer, new-indexing, subscription, and not-found message controls.
-- **Index groups** adds/removes sources. Removing a source does not delete its existing movie records.
+- **Settings** contains the profile image/description, welcome message/buttons, fuzzy search, auto-delete, new-indexing, subscription, and not-found message/button controls.
+- **Settings** also controls the Powered by line shown on search results.
+- **Index Sources** adds/removes sources, toggles new-file indexing, and starts old-file scans. Removing a source does not delete its existing movie records.
+- **Indexing progress** refreshes the latest per-source historical scan counts.
+- **Bot Groups** lists groups the bot has reported joining and can leave a group after confirmation.
+- **Duplicate Files** lists repeated Telegram file IDs; removing one deletes only the bot's index record, not the original Telegram message.
 - **Index old files** scans a registered source's message history.
 - **Members** displays registered members, their Telegram ID, request count, and most recent request.
-- **Broadcast** sends text and optionally adds a clickable URL button.
+- **Broadcast** sends text and turns a supplied http/https URL into a clickable button.
 
 ## Important limitations
 

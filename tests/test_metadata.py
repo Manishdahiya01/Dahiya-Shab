@@ -1,4 +1,6 @@
 
+from bot.metadata import parse_metadata
+
 
 def test_parse_caption_fields() -> None:
     result = parse_metadata("Dahiya Movie 2024 Hindi 1080p S02E03", "episode.mkv")
