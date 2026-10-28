@@ -19,8 +19,6 @@ def main():
         return
 
     application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
-    
-    # Register all handlers
     register_handlers(application)
     
     logger.info("Starting bot polling...")
