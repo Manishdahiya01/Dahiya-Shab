@@ -3,7 +3,6 @@ import logging
 import asyncio
 from aiohttp import web
 from telegram.ext import Application
-from bot.config import BOT_TOKEN, MONGO_URI
 from bot.database import init_db
 
 # Logging setup
@@ -25,7 +24,6 @@ async def start_web_server():
     runner = web.AppRunner(app)
     await runner.setup()
     
-    # Render khud ek PORT deta hai, default 10000 rakha hai
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
@@ -35,10 +33,15 @@ async def main():
     """Bot, database aur web server ko ek sath run karta hai"""
     logger.info("Initializing Database...")
     await init_db()
-    logger.info("Database and Bot initialized successfully.")
+    logger.info("Database initialized successfully.")
 
-    # Telegram Bot Application setup (tera original BOT_TOKEN use ho raha hai)
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Render environment variables se direct token utha rahe hain taaki koi import error na aaye
+    bot_token = os.environ.get("BOT_TOKEN") or os.environ.get("TOKEN")
+    if not bot_token:
+        raise ValueError("Error: BOT_TOKEN environment variable is missing!")
+
+    # Telegram Bot Application setup
+    application = Application.builder().token(bot_token).build()
 
     # Aiohttp Web Server aur Telegram Polling ko ek sath background mein chalana
     await start_web_server()
