@@ -12,11 +12,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 async def health_check(request):
-    """Render port requirement ko satisfy karne ke liye simple web response"""
+    """Render port requirement ko satisfy karne ke liye health check endpoint"""
     return web.Response(text="Dahiya-Shab Bot is active and running!")
 
 async def start_web_server():
-    """Aiohttp web server start karta hai jo Render ke PORT par listen karega"""
+    """Aiohttp web server jo Render ke diye gaye PORT par listen karega"""
     app = web.Application()
     app.router.add_get("/", health_check)
     app.router.add_get("/health", health_check)
@@ -30,12 +30,12 @@ async def start_web_server():
     logger.info(f"Web server started and listening on port {port}")
 
 async def main():
-    """Bot, database aur web server ko ek sath run karta hai"""
+    """Database, Web Server aur Telegram Bot ko ek sath run karne ka main function"""
     logger.info("Initializing Database...")
     await init_db()
     logger.info("Database initialized successfully.")
 
-    # Render environment variables se direct token utha rahe hain taaki koi import error na aaye
+    # Environment variables se direct token uthana taaki import error na ho
     bot_token = os.environ.get("BOT_TOKEN") or os.environ.get("TOKEN")
     if not bot_token:
         raise ValueError("Error: BOT_TOKEN environment variable is missing!")
@@ -43,15 +43,16 @@ async def main():
     # Telegram Bot Application setup
     application = Application.builder().token(bot_token).build()
 
-    # Aiohttp Web Server aur Telegram Polling ko ek sath background mein chalana
+    # Aiohttp Web Server start karna taaki port open rahe
     await start_web_server()
 
+    # Bot polling start karna
     logger.info("Starting bot polling...")
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
 
-    # Infinite loop taaki application band na ho aur port open rahe
+    # Infinite loop taaki application band na ho
     stop_event = asyncio.Event()
     await stop_event.wait()
 
