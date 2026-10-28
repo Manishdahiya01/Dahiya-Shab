@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from typing import Any
 
 from pymongo import AsyncMongoClient, ASCENDING, DESCENDING, TEXT, UpdateOne
@@ -18,7 +19,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "auto_delete": {"enabled": False, "seconds": 300},
     "subscription": {"enabled": False},
     "new_indexing_enabled": True,
+    "fuzzy_search_enabled": True,
+    "welcome_message": "Send a movie or series name to search the indexed files.",
+    "welcome_button": None,
+    "custom_reply_buttons": [],
     "not_found_message": "Sorry, this movie was not found. Please check the name and try again.",
+    "not_found_button": None,
     "broadcast": {},
 }
 
@@ -85,7 +91,7 @@ class Database:
                 {"_id": "main"}, {"$setOnInsert": defaults}, upsert=True
             )
             current = await self.settings.find_one({"_id": "main"})
-        return current or DEFAULT_SETTINGS.copy()
+        return {**DEFAULT_SETTINGS, **(current or {})}
 
     async def update_settings(self, values: dict[str, Any]) -> None:
         await self.settings.update_one({"_id": "main"}, {"$set": values}, upsert=True)
@@ -193,32 +199,65 @@ class Database:
         await self.movies.bulk_write(operations, ordered=False)
         return len(operations)
 
-    async def search_movies(self, query: str, limit: int = 100) -> list[dict[str, Any]]:
+    async def search_movies(
+        self,
+        query: str,
+        limit: int = 100,
+        fuzzy_enabled: bool = True,
+    ) -> list[dict[str, Any]]:
         query = query.strip()[:120]
         if not query:
             return []
+        results: list[dict[str, Any]] = []
         try:
             cursor = self.movies.find(
                 {"$text": {"$search": query}},
                 {"score": {"$meta": "textScore"}},
             ).sort([("score", {"$meta": "textScore"})]).limit(limit)
             results = await cursor.to_list(length=limit)
-            if results:
-                return results
         except OperationFailure:
             logger.exception("Text search failed; trying escaped regular-expression search.")
 
-        escaped = re_escape(query)
-        cursor = self.movies.find(
-            {
-                "$or": [
-                    {"title": {"$regex": escaped, "$options": "i"}},
-                    {"normalized_title": {"$regex": escaped, "$options": "i"}},
-                    {"caption": {"$regex": escaped, "$options": "i"}},
-                ]
-            }
-        ).sort([("year", DESCENDING), ("title", ASCENDING)]).limit(limit)
-        return await cursor.to_list(length=limit)
+        if not results:
+            escaped = re_escape(query)
+            cursor = self.movies.find(
+                {
+                    "$or": [
+                        {"title": {"$regex": escaped, "$options": "i"}},
+                        {"normalized_title": {"$regex": escaped, "$options": "i"}},
+                        {"caption": {"$regex": escaped, "$options": "i"}},
+                    ]
+                }
+            ).sort([("year", DESCENDING), ("title", ASCENDING)]).limit(limit)
+            results = await cursor.to_list(length=limit)
+        if results or not fuzzy_enabled:
+            return results
+
+        normalized_query = _normalize_search(query)
+        query_tokens = normalized_query.split()
+        if not query_tokens or not any(len(token) >= 3 for token in query_tokens):
+            return []
+
+        candidates = await self.movies.find().sort("indexed_at", DESCENDING).limit(5000).to_list(length=5000)
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for item in candidates:
+            title = _normalize_search(item.get("normalized_title") or item.get("title") or "")
+            title_tokens = title.split()
+            if not title_tokens:
+                continue
+            token_scores = [
+                max(SequenceMatcher(None, token, candidate).ratio() for candidate in title_tokens)
+                for token in query_tokens
+            ]
+            coverage = sum(score >= 0.58 for score in token_scores) / len(token_scores)
+            token_score = sum(token_scores) / len(token_scores)
+            whole_score = SequenceMatcher(None, normalized_query, title).ratio()
+            score = max(whole_score, token_score * 0.8 + coverage * 0.2)
+            if score >= 0.66:
+                scored.append((score, item))
+
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [item for _, item in scored[:limit]]
 
     async def get_movie(self, file_key: str) -> dict[str, Any] | None:
         return await self.movies.find_one({"file_key": file_key})
@@ -228,6 +267,15 @@ class Database:
 
     async def count_members(self) -> int:
         return await self.members.count_documents({})
+
+    async def active_member_count(self, since: datetime) -> int:
+        return await self.members.count_documents({"last_seen": {"$gte": since}})
+
+    async def active_members(self, since: datetime, limit: int = 10) -> list[dict[str, Any]]:
+        return await self.members.find({"last_seen": {"$gte": since}}).sort("last_seen", DESCENDING).limit(limit).to_list(length=limit)
+
+    async def recent_requests(self, offset: int = 0, limit: int = 10) -> list[dict[str, Any]]:
+        return await self.requests.find().sort("created_at", DESCENDING).skip(offset).limit(limit).to_list(length=limit)
 
     async def request_stats(self) -> dict[str, Any]:
         total = await self.requests.count_documents({})
@@ -256,6 +304,16 @@ class Database:
             },
             upsert=True,
         )
+
+    async def get_delivery(self, chat_id: int, message_id: int) -> dict[str, Any] | None:
+        return await self.deliveries.find_one({"chat_id": chat_id, "message_id": message_id})
+
+    async def expired_delivery_count(self, now: datetime) -> int:
+        return await self.deliveries.count_documents({"expires_at": {"$lte": now}})
+
+    async def purge_expired_deliveries(self, now: datetime) -> int:
+        result = await self.deliveries.delete_many({"expires_at": {"$lte": now}})
+        return int(result.deleted_count)
 
     async def due_deliveries(self, now: datetime) -> list[dict[str, Any]]:
         return await self.deliveries.find({"expires_at": {"$lte": now}}).limit(100).to_list(length=100)
@@ -289,4 +347,10 @@ def re_escape(value: str) -> str:
     import re
 
     return re.escape(value)
+
+
+def _normalize_search(value: str) -> str:
+    return " ".join(
+        "".join(character.lower() if character.isalnum() else " " for character in value).split()
+    )
 

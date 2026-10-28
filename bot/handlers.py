@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from html import escape
 from typing import Any
 from urllib.parse import urlparse
 
@@ -26,6 +27,7 @@ from .keyboards import (
     filter_options_keyboard,
     join_gate,
     members_keyboard,
+    page_picker_keyboard,
     results_keyboard,
     settings_menu,
     source_list,
@@ -92,18 +94,24 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     description = settings.get("bot_description") or "Search Dahiya Movie Store"
+    welcome_message = settings.get("welcome_message") or "Send a movie or series name to search the indexed files."
     text = (
         f"Welcome to Dahiya Movie Store.\n\n{description}\n\n"
-        "Send a movie or series name to search the indexed files."
+        f"{welcome_message}"
     )
+    markup = _welcome_keyboard(settings, _is_admin(user.id if user else None, admins))
     photo_id = settings.get("welcome_photo_file_id")
     if photo_id:
         try:
-            await update.effective_message.reply_photo(photo_id, caption=text)
+            if len(text) <= 1024:
+                await update.effective_message.reply_photo(photo_id, caption=text, reply_markup=markup)
+            else:
+                await update.effective_message.reply_photo(photo_id, caption="Welcome to Dahiya Movie Store.")
+                await update.effective_message.reply_text(text, reply_markup=markup)
             return
         except TelegramError:
             logger.exception("The saved welcome photo could not be sent.")
-    await update.effective_message.reply_text(text)
+    await update.effective_message.reply_text(text, reply_markup=markup)
 
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -124,6 +132,89 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_message.reply_text("Current action cancelled.")
 
 
+def _welcome_keyboard(settings: dict[str, Any], is_admin: bool) -> InlineKeyboardMarkup | None:
+    rows = []
+    welcome_button = settings.get("welcome_button")
+    if isinstance(welcome_button, dict) and welcome_button.get("label") and welcome_button.get("url"):
+        rows.append([InlineKeyboardButton(welcome_button["label"][:64], url=welcome_button["url"])])
+    for item in (settings.get("custom_reply_buttons") or [])[:8]:
+        if isinstance(item, dict) and item.get("label") and item.get("url"):
+            rows.append([InlineKeyboardButton(item["label"][:64], url=item["url"])])
+    if is_admin:
+        rows.append([InlineKeyboardButton("👑 Admin Panel", callback_data="adm:home")])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def _not_found_keyboard(settings: dict[str, Any]) -> InlineKeyboardMarkup | None:
+    item = settings.get("not_found_button")
+    if isinstance(item, dict) and item.get("label") and item.get("url"):
+        return InlineKeyboardMarkup([[InlineKeyboardButton(item["label"][:64], url=item["url"])]])
+    return None
+
+
+def _result_line(item: dict[str, Any]) -> str:
+    label = item.get("filename") or item.get("title") or "Indexed file"
+    details = []
+    size = item.get("size")
+    if isinstance(size, (int, float)) and size > 0:
+        amount, unit = float(size), "B"
+        for next_unit in ("KB", "MB", "GB", "TB"):
+            if amount < 1024:
+                break
+            amount /= 1024
+            unit = next_unit
+        details.append(f"{amount:.1f} {unit}")
+    if item.get("year"):
+        details.append(str(item["year"]))
+    details.extend(item.get("languages") or [])
+    if item.get("quality"):
+        details.append(str(item["quality"]))
+    if item.get("season") is not None:
+        details.append(f"S{item['season']}")
+    if item.get("episode") is not None:
+        details.append(f"E{item['episode']}")
+    suffix = f" · {' · '.join(details)[:120]}" if details else ""
+    url = escape(_source_link(item), quote=True)
+    return f'🔹 <a href="{url}">{escape(str(label)[:200])}</a>{escape(suffix)}'
+
+
+async def _schedule_result_auto_delete(
+    context: ContextTypes.DEFAULT_TYPE,
+    db: Database,
+    message: Any,
+    settings: dict[str, Any],
+) -> None:
+    auto_delete = settings.get("auto_delete", {})
+    if not auto_delete.get("enabled") or not message:
+        return
+    seconds = max(5, int(auto_delete.get("seconds", 300)))
+    existing = await db.get_delivery(message.chat_id, message.message_id)
+    status_id = existing.get("status_message_id") if existing else None
+    status_text = f"⏳ AUTO-DELETE IN {seconds} SECONDS"
+    if status_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=message.chat_id,
+                message_id=status_id,
+                text=status_text,
+            )
+        except TelegramError:
+            status_id = None
+    if not status_id:
+        status = await context.bot.send_message(
+            chat_id=message.chat_id,
+            text=status_text,
+            reply_to_message_id=message.message_id,
+        )
+        status_id = status.message_id
+    await db.make_delivery(
+        message.chat_id,
+        message.message_id,
+        status_id,
+        utc_now() + timedelta(seconds=seconds),
+    )
+
+
 async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database, page: int = 0) -> None:
     hits: list[dict[str, Any]] = context.user_data.get("search_hits", [])
     filters = context.user_data.get("search_filters", {})
@@ -136,14 +227,22 @@ async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, db: 
             hits = [item for item in hits if (item.get("quality") or "") == selected]
         elif key == "season":
             hits = [item for item in hits if str(item.get("season")) == selected]
+        elif key == "episode":
+            hits = [item for item in hits if str(item.get("episode")) == selected]
 
+    page = max(0, page)
+    if hits:
+        page = min(page, (len(hits) - 1) // PAGE_SIZE)
     start = page * PAGE_SIZE
     page_items = hits[start : start + PAGE_SIZE]
+    context.user_data["current_page"] = page
+    context.user_data["visible_total"] = len(hits)
     context.user_data["visible_file_keys"] = [item["file_key"] for item in page_items]
     filter_values = {
         "languages": sorted({lang for item in hits for lang in item.get("languages", [])}),
         "year": sorted({str(item["year"]) for item in hits if item.get("year") is not None}, reverse=True),
         "quality": sorted({item["quality"] for item in hits if item.get("quality")}),
+        "episode": sorted({str(item["episode"]) for item in hits if item.get("episode") is not None}),
         "season": sorted({str(item["season"]) for item in hits if item.get("season") is not None}),
     }
     context.user_data["filter_values"] = filter_values
@@ -151,22 +250,53 @@ async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, db: 
         settings = await db.get_settings()
         message = settings.get("not_found_message") or "Sorry, this movie was not found."
         if update.callback_query:
-            await update.callback_query.edit_message_text(message)
+            await update.callback_query.edit_message_text(message, reply_markup=_not_found_keyboard(settings))
+            result_message = update.callback_query.message
         else:
-            await update.effective_message.reply_text(message)
+            result_message = await update.effective_message.reply_text(
+                message,
+                reply_markup=_not_found_keyboard(settings),
+            )
+        await _schedule_result_auto_delete(context, db, result_message, settings)
         return
 
     query = context.user_data.get("last_search", "")
-    summary = f"Results for: {query}\nFound {len(hits)} indexed file(s). Select a file or filter:"
+    header = (
+        f"<b>Results for:</b> {escape(str(query)[:120])}\n"
+        f"Found {len(hits)} indexed file(s). Select a file or filter:\n\n"
+    )
+    lines = []
+    used_chars = len(header)
+    for item in page_items:
+        line = _result_line(item)
+        if used_chars + len(line) + 1 > 3800:
+            break
+        lines.append(line)
+        used_chars += len(line) + 1
+    if len(lines) < len(page_items):
+        lines.append("More files are available on the next page.")
+    summary = header + "\n".join(lines)
     keyboard = results_keyboard(page_items, page, len(hits), filter_values)
     if update.callback_query:
         try:
-            await update.callback_query.edit_message_text(summary, reply_markup=keyboard)
+            await update.callback_query.edit_message_text(
+                summary,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
         except BadRequest as exc:
             if "Message is not modified" not in str(exc):
                 raise
+        result_message = update.callback_query.message
     else:
-        await update.effective_message.reply_text(summary, reply_markup=keyboard)
+        result_message = await update.effective_message.reply_text(
+            summary,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    await _schedule_result_auto_delete(context, db, result_message, await db.get_settings())
 
 
 async def _run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database, query: str) -> None:
@@ -176,7 +306,11 @@ async def _run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Da
         return
     await db.register_member(update.effective_user)
     await db.record_request(update.effective_user, query)
-    hits = await db.search_movies(query)
+    settings = await db.get_settings()
+    hits = await db.search_movies(
+        query,
+        fuzzy_enabled=settings.get("fuzzy_search_enabled", True),
+    )
     context.user_data["last_search"] = query
     context.user_data["search_hits"] = hits
     context.user_data["search_filters"] = {}
@@ -215,6 +349,16 @@ def _valid_url(value: str) -> str | None:
     return candidate if parsed.scheme in ("http", "https") and parsed.netloc else None
 
 
+def _parse_link_button(value: str) -> dict[str, str] | None:
+    parts = [part.strip() for part in value.split("|", 1)]
+    if len(parts) != 2 or not parts[0] or len(parts[0]) > 64:
+        return None
+    url = _valid_url(parts[1])
+    if not url:
+        return None
+    return {"label": parts[0], "url": url}
+
+
 async def _prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, state: str, text: str) -> None:
     context.user_data["admin_state"] = state
     await update.callback_query.message.reply_text(text)
@@ -227,29 +371,123 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     if not _is_admin(user.id if user else None, admins):
         await query.answer("Not allowed.", show_alert=True)
         return
+    await db.register_member(user)
     await query.answer()
     settings = await db.get_settings()
 
     if data == "adm:home":
-        await query.edit_message_text("Dahiya Movie Store — Admin Panel", reply_markup=admin_home(settings))
+        await query.edit_message_text("👑 DAHIYA MOVIE STORE — ADMIN PANEL", reply_markup=admin_home(settings))
     elif data == "adm:toggle_bot":
         enabled = not settings.get("bot_enabled", True)
         await db.update_settings({"bot_enabled": enabled})
-        await query.edit_message_text(f"Bot is now {'ON' if enabled else 'OFF'}.", reply_markup=admin_home(await db.get_settings()))
+        await query.edit_message_text("👑 DAHIYA MOVIE STORE — ADMIN PANEL", reply_markup=admin_home(await db.get_settings()))
     elif data == "adm:dashboard":
         stats = await db.request_stats()
         members = await db.count_members()
+        active = await db.active_member_count(utc_now() - timedelta(minutes=5))
         recent = "\n".join(
             f"• {row.get('name') or row.get('username') or row['user_id']} ({row['user_id']}): {row.get('query', '')}"
             for row in stats["latest"]
         ) or "No requests yet."
         text = (
-            "Live dashboard\n"
-            f"Members: {members}\nRequests: {stats['requests']}\n"
-            f"Indexed files: {stats['indexed']}\nIndex groups: {stats['sources']}\n\n"
+            "📊 LIVE DASHBOARD\n"
+            f"👥 Active in last 5 min: {active}\nMembers: {members}\n"
+            f"🔎 Search requests: {stats['requests']}\n"
+            f"📁 Indexed files: {stats['indexed']}\nIndex groups: {stats['sources']}\n\n"
             f"Recent requests:\n{recent}"
         )
-        await query.edit_message_text(text[:3900], reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="adm:home")]]))
+        await query.edit_message_text(
+            text[:3900],
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("Live Users & Activity", callback_data="adm:live"),
+                     InlineKeyboardButton("User Search Requests", callback_data="adm:requests:0")],
+                    [InlineKeyboardButton("Back", callback_data="adm:home")],
+                ]
+            ),
+        )
+    elif data == "adm:live":
+        since = utc_now() - timedelta(minutes=5)
+        active = await db.active_member_count(since)
+        recent = await db.active_members(since, 10)
+        lines = [
+            f"• {' '.join(filter(None, [row.get('first_name'), row.get('last_name')])) or row.get('username') or row['user_id']} — last request: {row.get('last_request') or '—'}"
+            for row in recent
+        ]
+        text = (
+            "👥 LIVE USERS & ACTIVITY\n"
+            "Active means a message or request in the last 5 minutes; Telegram does not expose a bot's full online list.\n\n"
+            f"Active: {active}\n\n" + ("\n".join(lines) if lines else "No recent activity.")
+        )
+        await query.edit_message_text(
+            text[:3900],
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("Members", callback_data="adm:members:0")],
+                    [InlineKeyboardButton("Back", callback_data="adm:home")],
+                ]
+            ),
+        )
+    elif data.startswith("adm:requests:"):
+        offset = max(0, int(data.rsplit(":", 1)[1]))
+        stats = await db.request_stats()
+        rows = await db.recent_requests(offset, 10)
+        lines = [
+            f"• {row.get('name') or row.get('username') or row.get('user_id')} ({row.get('user_id')}): {row.get('query', '')}"
+            for row in rows
+        ]
+        buttons = []
+        if offset > 0:
+            buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"adm:requests:{max(0, offset - 10)}"))
+        if offset + 10 < stats["requests"]:
+            buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"adm:requests:{offset + 10}"))
+        rows_markup = [buttons] if buttons else []
+        rows_markup.append([InlineKeyboardButton("Back", callback_data="adm:home")])
+        text = f"🔎 USER SEARCH REQUESTS · {stats['requests']} total\n\n" + ("\n".join(lines) if lines else "No requests yet.")
+        await query.edit_message_text(text[:3900], reply_markup=InlineKeyboardMarkup(rows_markup))
+    elif data == "adm:cleanup":
+        expired = await db.expired_delivery_count(utc_now())
+        await query.edit_message_text(
+            "🧹 DATABASE CLEANUP\n"
+            f"Expired auto-delete queue records: {expired}\n"
+            "Movie index, members, settings, and source history will not be touched.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("Delete expired messages", callback_data="adm:cleanup:confirm")],
+                    [InlineKeyboardButton("Back", callback_data="adm:home")],
+                ]
+            ),
+        )
+    elif data == "adm:cleanup:confirm":
+        removed = 0
+        for delivery in await db.due_deliveries(utc_now()):
+            try:
+                await context.bot.delete_message(
+                    chat_id=delivery["chat_id"],
+                    message_id=delivery["message_id"],
+                )
+            except BadRequest as exc:
+                if "message to delete not found" not in str(exc).lower():
+                    logger.warning("Cleanup could not delete expired message %s: %s", delivery["message_id"], exc)
+                    continue
+            except TelegramError:
+                logger.exception("Cleanup could not delete expired message %s.", delivery["message_id"])
+                continue
+            status_id = delivery.get("status_message_id")
+            if status_id:
+                try:
+                    await context.bot.delete_message(
+                        chat_id=delivery["chat_id"],
+                        message_id=status_id,
+                    )
+                except TelegramError:
+                    logger.debug("Expired countdown message %s was already unavailable.", status_id)
+            await db.remove_delivery(delivery["chat_id"], delivery["message_id"])
+            removed += 1
+        await query.edit_message_text(
+            f"Deleted {removed} expired result/delivery message(s). Movie index data was left unchanged.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="adm:home")]]),
+        )
     elif data.startswith("adm:members:"):
         offset = max(0, int(data.rsplit(":", 1)[1]))
         total = await db.count_members()
@@ -268,19 +506,35 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(text[:3900], reply_markup=members_keyboard(offset, total))
     elif data == "adm:settings":
         await query.edit_message_text("Settings", reply_markup=settings_menu(settings))
+    elif data == "adm:toggle_fuzzy":
+        enabled = not settings.get("fuzzy_search_enabled", True)
+        await db.update_settings({"fuzzy_search_enabled": enabled})
+        await query.edit_message_text(
+            f"Fuzzy search is now {'ON' if enabled else 'OFF'}.",
+            reply_markup=settings_menu(await db.get_settings()),
+        )
+    elif data == "adm:timers":
+        auto = settings.get("auto_delete", {})
+        await query.edit_message_text(
+            "⏱ TIMERS & COUNTDOWN\nThe timer starts when a search result is sent. It can be changed for future results.",
+            reply_markup=timer_menu(auto.get("seconds", 300), auto.get("enabled", False)),
+        )
     elif data == "adm:toggle_autodelete":
         enabled = not settings.get("auto_delete", {}).get("enabled", False)
         await db.update_settings({"auto_delete.enabled": enabled})
         await query.edit_message_text(
             f"Auto-delete is now {'ON' if enabled else 'OFF'}.",
-            reply_markup=settings_menu(await db.get_settings()),
+            reply_markup=timer_menu(
+                (await db.get_settings()).get("auto_delete", {}).get("seconds", 300),
+                enabled,
+            ),
         )
     elif data == "adm:toggle_new_index":
         enabled = not settings.get("new_indexing_enabled", True)
         await db.update_settings({"new_indexing_enabled": enabled})
         await query.edit_message_text(
             f"Automatic indexing of new channel files is now {'ON' if enabled else 'OFF'}.",
-            reply_markup=settings_menu(await db.get_settings()),
+            reply_markup=source_list(await db.get_sources(), enabled),
         )
     elif data == "adm:toggle_subscription":
         enabled = not settings.get("subscription", {}).get("enabled", False)
@@ -291,13 +545,16 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         )
     elif data == "adm:timer":
         seconds = settings.get("auto_delete", {}).get("seconds", 300)
-        await query.edit_message_text("Choose an auto-delete duration:", reply_markup=timer_menu(seconds))
+        await query.edit_message_text(
+            "Choose an auto-delete duration:",
+            reply_markup=timer_menu(seconds, settings.get("auto_delete", {}).get("enabled", False)),
+        )
     elif data.startswith("adm:set_timer:"):
         seconds = int(data.rsplit(":", 1)[1])
         await db.update_settings({"auto_delete.seconds": seconds})
         await query.edit_message_text(
             f"Auto-delete duration set to {seconds} seconds.",
-            reply_markup=settings_menu(await db.get_settings()),
+            reply_markup=timer_menu(seconds, settings.get("auto_delete", {}).get("enabled", False)),
         )
     elif data == "adm:custom_timer":
         await _prompt(update, context, "timer", "Send a custom duration in seconds (5–86400).")
@@ -305,21 +562,90 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         await _prompt(update, context, "description", "Send the new bot description (up to 512 characters).")
     elif data == "adm:photo":
         await _prompt(update, context, "photo", "Send a JPG/PNG photo. It will update the bot profile and the welcome image.")
+    elif data == "adm:welcome":
+        current = settings.get("welcome_message") or "Send a movie or series name to search the indexed files."
+        await query.edit_message_text(
+            f"Current welcome message:\n\n{current}",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("Edit welcome message", callback_data="adm:edit_welcome")],
+                    [InlineKeyboardButton("Back", callback_data="adm:settings")],
+                ]
+            ),
+        )
+    elif data == "adm:edit_welcome":
+        await _prompt(update, context, "welcome_message", "Send the welcome text users should see (up to 1000 characters).")
+    elif data == "adm:welcome_button":
+        current = settings.get("welcome_button")
+        label = f"{current.get('label')} | {current.get('url')}" if isinstance(current, dict) else "Not set"
+        await query.edit_message_text(
+            f"Welcome URL button: {label}",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("Set / replace button", callback_data="adm:edit_welcome_button"),
+                     InlineKeyboardButton("Clear", callback_data="adm:clear_welcome_button")],
+                    [InlineKeyboardButton("Back", callback_data="adm:settings")],
+                ]
+            ),
+        )
+    elif data == "adm:edit_welcome_button":
+        await _prompt(update, context, "welcome_button", "Send button label and URL like: Join channel | https://t.me/example")
+    elif data == "adm:clear_welcome_button":
+        await db.update_settings({"welcome_button": None})
+        await query.edit_message_text("Welcome URL button cleared.", reply_markup=settings_menu(await db.get_settings()))
+    elif data == "adm:reply_buttons":
+        buttons = settings.get("custom_reply_buttons") or []
+        lines = [f"• {item.get('label')} — {item.get('url')}" for item in buttons if isinstance(item, dict)]
+        rows = [
+            [InlineKeyboardButton(f"Remove {item.get('label', 'button')}"[:60], callback_data=f"adm:remove_reply:{index}")]
+            for index, item in enumerate(buttons[:8])
+            if isinstance(item, dict)
+        ]
+        rows.append([InlineKeyboardButton("Add reply button", callback_data="adm:add_reply_button")])
+        rows.append([InlineKeyboardButton("Back", callback_data="adm:settings")])
+        await query.edit_message_text(
+            "🔗 BOT REPLY BUTTONS\n" + ("\n".join(lines) if lines else "No custom buttons yet."),
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+    elif data == "adm:add_reply_button":
+        await _prompt(update, context, "reply_button", "Send button label and URL like: Help | https://example.com/help")
+    elif data.startswith("adm:remove_reply:"):
+        try:
+            index = int(data.rsplit(":", 1)[1])
+            buttons = list(settings.get("custom_reply_buttons") or [])
+            buttons.pop(index)
+        except (ValueError, IndexError):
+            await query.edit_message_text(
+                "That button is no longer available.",
+                reply_markup=settings_menu(settings),
+            )
+            return
+        await db.update_settings({"custom_reply_buttons": buttons})
+        await query.edit_message_text("Reply button removed.", reply_markup=settings_menu(await db.get_settings()))
     elif data == "adm:notfound":
         current = settings.get("not_found_message", "")
+        not_found_button = settings.get("not_found_button")
+        button_label = not_found_button.get("label") if isinstance(not_found_button, dict) else "Not set"
         await query.edit_message_text(
-            f"Current movie-not-found message:\n\n{current}",
+            f"Current movie-not-found message:\n\n{current}\n\nButton: {button_label}",
             reply_markup=InlineKeyboardMarkup(
                 [
                     [InlineKeyboardButton("Edit message", callback_data="adm:edit_notfound"),
                      InlineKeyboardButton("Reset", callback_data="adm:reset_notfound"),
                      InlineKeyboardButton("Clear", callback_data="adm:clear_notfound")],
+                    [InlineKeyboardButton("Set URL button", callback_data="adm:set_notfound_button"),
+                     InlineKeyboardButton("Clear URL button", callback_data="adm:clear_notfound_button")],
                     [InlineKeyboardButton("Back", callback_data="adm:settings")],
                 ]
             ),
         )
     elif data == "adm:edit_notfound":
         await _prompt(update, context, "notfound", "Send the replacement movie-not-found message.")
+    elif data == "adm:set_notfound_button":
+        await _prompt(update, context, "notfound_button", "Send button label and URL like: Request movie | https://example.com")
+    elif data == "adm:clear_notfound_button":
+        await db.update_settings({"not_found_button": None})
+        await query.edit_message_text("Movie-not-found URL button cleared.", reply_markup=settings_menu(await db.get_settings()))
     elif data == "adm:reset_notfound":
         await db.update_settings({"not_found_message": "Sorry, this movie was not found. Please check the name and try again."})
         await query.edit_message_text("Movie-not-found message reset.", reply_markup=settings_menu(await db.get_settings()))
@@ -327,7 +653,13 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         await db.update_settings({"not_found_message": ""})
         await query.edit_message_text("Custom message cleared. The built-in fallback will be used.", reply_markup=settings_menu(await db.get_settings()))
     elif data == "adm:sources":
-        await query.edit_message_text("Index groups/channels. Removing a source does not erase indexed records.", reply_markup=source_list(await db.get_sources()))
+        await query.edit_message_text(
+            "📁 INDEX SOURCES\nRemoving a source does not erase its indexed records.",
+            reply_markup=source_list(
+                await db.get_sources(),
+                settings.get("new_indexing_enabled", True),
+            ),
+        )
     elif data == "adm:add_source":
         await _prompt(update, context, "add_source", "Send the source chat ID (for example -1001234567890). Add this bot as an administrator with permission to read channel posts.")
     elif data.startswith("adm:del_source:"):
@@ -335,7 +667,10 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         removed = await db.remove_source(chat_id)
         await query.edit_message_text(
             "Source removed. Existing indexed records were kept." if removed else "Source was not found.",
-            reply_markup=source_list(await db.get_sources()),
+            reply_markup=source_list(
+                await db.get_sources(),
+                settings.get("new_indexing_enabled", True),
+            ),
         )
     elif data.startswith("adm:edit_source:"):
         chat_id = data[len("adm:edit_source:"):]
@@ -405,6 +740,40 @@ async def _handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             result = "The in-bot description was saved, but Telegram could not update the profile description. Check the BotFather configuration and try again."
         context.user_data.pop("admin_state", None)
         await update.effective_message.reply_text(result, reply_markup=settings_menu(await db.get_settings()))
+    elif state == "welcome_message":
+        if not text or len(text) > 1000:
+            await update.effective_message.reply_text("Send welcome text between 1 and 1000 characters.")
+            return True
+        await db.update_settings({"welcome_message": text})
+        context.user_data.pop("admin_state", None)
+        await update.effective_message.reply_text(
+            "Welcome message updated.",
+            reply_markup=settings_menu(await db.get_settings()),
+        )
+    elif state in ("welcome_button", "reply_button", "notfound_button"):
+        button = _parse_link_button(text)
+        if not button:
+            await update.effective_message.reply_text(
+                "Use this format with a valid http/https link: Button label | https://example.com"
+            )
+            return True
+        if state == "welcome_button":
+            await db.update_settings({"welcome_button": button})
+            result = "Welcome URL button saved."
+        elif state == "notfound_button":
+            await db.update_settings({"not_found_button": button})
+            result = "Movie-not-found URL button saved."
+        else:
+            buttons = list((await db.get_settings()).get("custom_reply_buttons") or [])
+            if len(buttons) >= 8:
+                context.user_data.pop("admin_state", None)
+                await update.effective_message.reply_text("You can keep up to 8 custom reply buttons.")
+                return True
+            buttons.append(button)
+            await db.update_settings({"custom_reply_buttons": buttons})
+            result = "Bot reply button saved. It will appear on the welcome screen."
+        context.user_data.pop("admin_state", None)
+        await update.effective_message.reply_text(result, reply_markup=settings_menu(await db.get_settings()))
     elif state == "notfound":
         if not text or len(text) > 1000:
             await update.effective_message.reply_text("Send a message between 1 and 1000 characters.")
@@ -420,30 +789,42 @@ async def _handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         context.user_data.pop("admin_state", None)
         await update.effective_message.reply_text(
             f"Auto-delete duration set to {text} seconds.",
-            reply_markup=settings_menu(await db.get_settings()),
+            reply_markup=timer_menu(
+                int(text),
+                (await db.get_settings()).get("auto_delete", {}).get("enabled", False),
+            ),
         )
     elif state == "add_source":
         source_id = text.split()[0]
+        lookup_id: int | str
         try:
-            numeric_id = int(source_id)
+            lookup_id = int(source_id)
         except ValueError:
-            await update.effective_message.reply_text("The source ID must be numeric, like -1001234567890.")
-            return True
+            if source_id.startswith("@"):
+                lookup_id = source_id
+            else:
+                await update.effective_message.reply_text(
+                    "Send a numeric chat ID like -1001234567890 or a public @channel username."
+                )
+                return True
         try:
-            chat = await context.bot.get_chat(numeric_id)
+            chat = await context.bot.get_chat(lookup_id)
             await db.save_source(
-                numeric_id,
-                chat.title or chat.username or str(numeric_id),
+                chat.id,
+                chat.title or chat.username or str(chat.id),
                 chat.type,
                 chat.username,
             )
             context.user_data.pop("admin_state", None)
             await update.effective_message.reply_text(
-                f"Added {chat.title or chat.username or numeric_id} to indexing sources. New posts will be indexed automatically when new indexing is ON.",
-                reply_markup=source_list(await db.get_sources()),
+                f"Added {chat.title or chat.username or chat.id} to indexing sources. New posts will be indexed automatically when new indexing is ON.",
+                reply_markup=source_list(
+                    await db.get_sources(),
+                    (await db.get_settings()).get("new_indexing_enabled", True),
+                ),
             )
         except TelegramError:
-            logger.exception("Could not add Telegram index source %s.", numeric_id)
+            logger.exception("Could not add Telegram index source %s.", lookup_id)
             await update.effective_message.reply_text("Telegram could not access that chat. Add the bot there first, make it an administrator, then try again.")
     elif state == "edit_source":
         chat_id = context.user_data.pop("source_to_edit", "")
@@ -454,7 +835,10 @@ async def _handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
         context.user_data.pop("admin_state", None)
         await update.effective_message.reply_text(
             "Source name updated." if changed else "That source no longer exists.",
-            reply_markup=source_list(await db.get_sources()),
+            reply_markup=source_list(
+                await db.get_sources(),
+                (await db.get_settings()).get("new_indexing_enabled", True),
+            ),
         )
     elif state == "add_sub":
         parts = [part.strip() for part in text.split("|", 1)]
@@ -611,6 +995,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     db, _, admins = _services(context)
     user = update.effective_user
+    await db.register_member(user)
     if data == "sub:check":
         if not await _is_subscribed(update, context, db):
             await query.answer("Join the required channel(s) first.", show_alert=True)
@@ -629,9 +1014,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         kind = data.split(":", 1)[1]
         values = context.user_data.get("filter_values", {}).get(kind, [])
         if not values:
-            await query.message.reply_text("No filter options are available for this result.")
+            await query.edit_message_text("No filter options are available for this result.")
             return
-        await query.message.reply_text(
+        await query.edit_message_text(
             f"Choose {kind}:",
             reply_markup=filter_options_keyboard(kind, values),
         )
@@ -646,6 +1031,14 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.user_data.setdefault("search_filters", {})[kind] = selected
         await query.answer(f"Filter: {selected}")
         await _send_results(update, context, db)
+    elif data == "page:picker":
+        await query.answer()
+        await query.edit_message_reply_markup(
+            reply_markup=page_picker_keyboard(
+                context.user_data.get("visible_total", len(context.user_data.get("search_hits", []))),
+                context.user_data.get("current_page", 0),
+            )
+        )
     elif data.startswith("page:"):
         await query.answer()
         await _send_results(update, context, db, max(0, int(data.split(":", 1)[1])))
@@ -665,6 +1058,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 hits = [item for item in hits if item.get("quality") == selected]
             elif key == "season":
                 hits = [item for item in hits if str(item.get("season")) == selected]
+            elif key == "episode":
+                hits = [item for item in hits if str(item.get("episode")) == selected]
         if not hits:
             await query.message.reply_text("There are no matching files to send.")
             return
