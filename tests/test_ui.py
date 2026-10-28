@@ -87,8 +87,9 @@ def test_admin_home_exposes_requested_sections() -> None:
     ]
     assert {"adm:dashboard", "adm:sources", "adm:live", "adm:subscription",
             "adm:requests:0", "adm:broadcast", "adm:timers", "adm:settings",
-            "adm:cleanup", "adm:groups", "adm:toggle_group_search"} <= set(callbacks)
+            "adm:groups", "adm:toggle_group_search"} <= set(callbacks)
     assert "adm:duplicates" not in callbacks
+    assert "adm:cleanup" not in callbacks
     group_button = next(
         button
         for row in admin_home({"group_search_enabled": False}).inline_keyboard

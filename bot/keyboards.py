@@ -23,7 +23,6 @@ def admin_home(settings: dict[str, Any]) -> InlineKeyboardMarkup:
              InlineKeyboardButton(group_replies_label, callback_data="adm:toggle_group_search")],
             [InlineKeyboardButton("⏱ Timers & Countdown", callback_data="adm:timers"),
              InlineKeyboardButton("⚙️ Settings", callback_data="adm:settings")],
-            [InlineKeyboardButton("🧹 Database Cleanup", callback_data="adm:cleanup")],
         ]
     )
 
