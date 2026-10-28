@@ -34,6 +34,7 @@ from .keyboards import (
     settings_menu,
     source_list,
     subscription_list,
+    subscription_remove_list,
     timer_menu,
 )
 from .metadata import parse_metadata
@@ -399,6 +400,10 @@ async def _prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, state: str
     await update.callback_query.message.reply_text(text)
 
 
+def _subscription_count_text(channels: list[dict[str, Any]]) -> str:
+    return f"Total links: {len(channels)}"
+
+
 async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
     db, indexer, admins = _services(context)
     query = update.callback_query
@@ -412,6 +417,14 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     if data == "adm:home":
         await query.edit_message_text("👑 DAHIYA MOVIE STORE — ADMIN PANEL", reply_markup=admin_home(settings))
+    elif data == "adm:toggle_group_search":
+        enabled = not settings.get("group_search_enabled", True)
+        await db.update_settings({"group_search_enabled": enabled})
+        updated = await db.get_settings()
+        await query.edit_message_text(
+            f"Group replies are now {'ON' if enabled else 'OFF'}.",
+            reply_markup=admin_home(updated),
+        )
     elif data == "adm:toggle_bot":
         enabled = not settings.get("bot_enabled", True)
         await db.update_settings({"bot_enabled": enabled})
@@ -690,9 +703,10 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "adm:toggle_subscription":
         enabled = not settings.get("subscription", {}).get("enabled", False)
         await db.update_settings({"subscription.enabled": enabled})
+        channels = await db.get_subscriptions()
         await query.edit_message_text(
-            f"Force-subscription is now {'ON' if enabled else 'OFF'}.",
-            reply_markup=subscription_list(await db.get_subscriptions(), enabled),
+            f"Force-subscription is now {'ON' if enabled else 'OFF'}.\n{_subscription_count_text(channels)}",
+            reply_markup=subscription_list(enabled),
         )
     elif data == "adm:timer":
         seconds = settings.get("auto_delete", {}).get("seconds", 300)
@@ -864,7 +878,23 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "adm:subscription":
         channels = await db.get_subscriptions()
         enabled = settings.get("subscription", {}).get("enabled", False)
-        await query.edit_message_text("Force-subscription channels", reply_markup=subscription_list(channels, enabled))
+        await query.edit_message_text(
+            f"Force-subscription links\n{_subscription_count_text(channels)}",
+            reply_markup=subscription_list(enabled),
+        )
+    elif data == "adm:remove_sub":
+        channels = await db.get_subscriptions()
+        enabled = settings.get("subscription", {}).get("enabled", False)
+        if not channels:
+            await query.edit_message_text(
+                f"There are no force-subscription links to remove.\n{_subscription_count_text(channels)}",
+                reply_markup=subscription_list(enabled),
+            )
+        else:
+            await query.edit_message_text(
+                f"Choose the link to remove.\n{_subscription_count_text(channels)}",
+                reply_markup=subscription_remove_list(channels),
+            )
     elif data == "adm:add_sub":
         await _prompt(
             update,
@@ -875,9 +905,11 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif data.startswith("adm:del_sub:"):
         chat_id = data[len("adm:del_sub:"):]
         removed = await db.remove_subscription(chat_id)
+        channels = await db.get_subscriptions()
+        updated_settings = await db.get_settings()
         await query.edit_message_text(
-            "Subscription channel removed." if removed else "Channel was not found.",
-            reply_markup=subscription_list(await db.get_subscriptions(), (await db.get_settings()).get("subscription", {}).get("enabled", False)),
+            f"{'Subscription link removed.' if removed else 'Link was not found.'}\n{_subscription_count_text(channels)}",
+            reply_markup=subscription_list(updated_settings.get("subscription", {}).get("enabled", False)),
         )
     elif data == "adm:broadcast":
         context.user_data["admin_state"] = "broadcast_text"
@@ -1028,7 +1060,12 @@ async def _handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             chat = await context.bot.get_chat(chat_id)
             await db.save_subscription(str(chat.id), chat.title or chat.username or chat_id, join_url)
             context.user_data.pop("admin_state", None)
-            await update.effective_message.reply_text("Required channel added.", reply_markup=subscription_list(await db.get_subscriptions(), (await db.get_settings()).get("subscription", {}).get("enabled", False)))
+            channels = await db.get_subscriptions()
+            updated_settings = await db.get_settings()
+            await update.effective_message.reply_text(
+                f"Required channel added.\n{_subscription_count_text(channels)}",
+                reply_markup=subscription_list(updated_settings.get("subscription", {}).get("enabled", False)),
+            )
         except TelegramError:
             logger.exception("Could not add force-subscription channel %s.", chat_id)
             await update.effective_message.reply_text("Telegram could not access that channel. Add the bot there as an administrator and verify the chat ID.")
@@ -1126,9 +1163,32 @@ async def bot_membership_update(update: Update, context: ContextTypes.DEFAULT_TY
             change.chat.id,
             change.chat.title or change.chat.username or str(change.chat.id),
             change.chat.type,
+            str(status),
         )
-    elif status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+    else:
         await db.remove_bot_group(change.chat.id)
+
+
+async def _bot_is_group_admin(message: Any, context: ContextTypes.DEFAULT_TYPE, db: Database) -> bool:
+    group = await db.get_bot_group(message.chat.id)
+    if group and group.get("bot_status"):
+        return group["bot_status"] == ChatMemberStatus.ADMINISTRATOR
+
+    # Older group records do not store the bot's membership status.
+    try:
+        membership = await context.bot.get_chat_member(message.chat.id, context.bot.id)
+    except TelegramError:
+        logger.exception("Could not verify the bot's admin status in group %s.", message.chat.id)
+        return False
+
+    status = membership.status
+    await db.save_bot_group(
+        message.chat.id,
+        message.chat.title or message.chat.username or str(message.chat.id),
+        message.chat.type,
+        str(status),
+    )
+    return status == ChatMemberStatus.ADMINISTRATOR
 
 
 async def group_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1139,7 +1199,11 @@ async def group_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user = update.effective_user
     if message.text and not message.text.startswith("/") and user and not user.is_bot:
         settings = await db.get_settings()
+        if not settings.get("group_search_enabled", True):
+            return
         if not settings.get("bot_enabled", True) and not _is_admin(user.id, admins):
+            return
+        if not await _bot_is_group_admin(message, context, db):
             return
         if not _is_admin(user.id, admins) and not await _is_subscribed(update, context, db):
             await _show_join_gate(update, context, db)
@@ -1217,7 +1281,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         kind = data.split(":", 1)[1]
         values = context.user_data.get("filter_values", {}).get(kind, [])
         if not values:
-            await query.edit_message_text("No filter options are available for this result.")
+            await query.edit_message_text(
+                f"No {kind} options are indexed for these results.",
+                reply_markup=filter_options_keyboard(kind, []),
+            )
             return
         await query.edit_message_text(
             f"Choose {kind}:",
@@ -1321,7 +1388,13 @@ async def _deliver_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, db:
         )
 
 
+def _is_message_not_modified_error(error: BaseException | None) -> bool:
+    return isinstance(error, BadRequest) and "message is not modified" in str(error).lower()
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if _is_message_not_modified_error(context.error):
+        return
     logger.error("Unhandled bot update error.", exc_info=context.error)
     if isinstance(update, Update) and update.effective_message:
         try:

@@ -1,4 +1,4 @@
-
+"""
 Run locally with:
     python tools/create_telethon_session.py
 

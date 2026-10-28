@@ -19,6 +19,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "auto_delete": {"enabled": False, "seconds": 300},
     "subscription": {"enabled": False},
     "new_indexing_enabled": True,
+    "group_search_enabled": True,
     "fuzzy_search_enabled": True,
     "powered_by": "Dahiya Movie Store | Search Zone",
     "welcome_message": "Send a movie or series name to search the indexed files.",
@@ -373,7 +374,13 @@ class Database:
     async def get_latest_index_job(self, chat_id: int | str) -> dict[str, Any] | None:
         return await self.index_jobs.find_one({"chat_id": str(chat_id)}, sort=[("started_at", DESCENDING)])
 
-    async def save_bot_group(self, chat_id: int | str, title: str, chat_type: str) -> None:
+    async def save_bot_group(
+        self,
+        chat_id: int | str,
+        title: str,
+        chat_type: str,
+        bot_status: str | None = None,
+    ) -> None:
         await self.bot_groups.update_one(
             {"chat_id": str(chat_id)},
             {
@@ -381,11 +388,15 @@ class Database:
                     "chat_id": str(chat_id),
                     "title": title[:160],
                     "type": chat_type,
+                    "bot_status": bot_status,
                     "updated_at": utc_now(),
                 }
             },
             upsert=True,
         )
+
+    async def get_bot_group(self, chat_id: int | str) -> dict[str, Any] | None:
+        return await self.bot_groups.find_one({"chat_id": str(chat_id)})
 
     async def get_bot_groups(self) -> list[dict[str, Any]]:
         return await self.bot_groups.find().sort("title", ASCENDING).to_list(length=500)
