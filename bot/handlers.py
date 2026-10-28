@@ -5,7 +5,6 @@ from telegram.ext import ContextTypes
 from bot.database import db
 from bot.keyboards import get_admin_panel_keyboard, get_index_sources_keyboard, get_settings_keyboard, get_movie_result_keyboard
 
-# Global Dynamic Settings State
 SETTINGS = {
     "powered_by": "Powered by : दईआमु restore",
     "fuzzy_search": True,
@@ -43,7 +42,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "admin_dash":
-        # Total indexed files count from MongoDB database
         try:
             total_files = await db.files.count_documents({})
         except Exception:
@@ -92,7 +90,6 @@ async def movie_search_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.effective_user
     start_time = time.time()
 
-    # Real MongoDB Search (Strict lookup, no fake mock results)
     try:
         files_cursor = db.files.find({"file_name": {"$regex": text, "$options": "i"}}).limit(10)
         found_files = await files_cursor.to_list(length=10)
@@ -101,7 +98,6 @@ async def movie_search_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     elapsed = round(time.time() - start_time, 3)
 
-    # Agar database mein movie nahi milti toh 'Not Found' aur custom link dikhega
     if not found_files:
         not_found_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Request Movie / Custom Link", url=SETTINGS["not_found_link"])]
