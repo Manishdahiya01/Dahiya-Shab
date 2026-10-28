@@ -1,4 +1,4 @@
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
 def get_admin_panel_keyboard():
     return InlineKeyboardMarkup([
@@ -27,24 +27,11 @@ def get_settings_keyboard():
 def get_movie_result_keyboard(files, page=1, total_pages=1):
     buttons = []
     for file in files:
-        file_name = file.get("file_name", "Movie File")
-        file_size = file.get("file_size", "")
-        file_id = file.get("file_id", "")
-        buttons.append([InlineKeyboardButton(f"📦 [ {file_size} ] 📂 {file_name}", url="https://t.me/your_channel")])
+        buttons.append([InlineKeyboardButton(f"📦 [ {file.get('file_size', '')} ] 📂 {file.get('file_name', '')}", url="https://t.me/your_channel")])
 
-    buttons.append([
-        InlineKeyboardButton("Send All", callback_data="send_all"),
-        InlineKeyboardButton("Languages", callback_data="filter_lang"),
-        InlineKeyboardButton("Years", callback_data="filter_years")
-    ])
-    buttons.append([
-        InlineKeyboardButton("Quality", callback_data="filter_quality"),
-        InlineKeyboardButton("Episodes", callback_data="filter_episodes"),
-        InlineKeyboardButton("Seasons", callback_data="filter_seasons")
-    ])
-    buttons.append([
-        InlineKeyboardButton("PAGE", callback_data="noop"),
-        InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"),
-        InlineKeyboardButton("NEXT ➔", callback_data="next_page")
+    buttons.extend([
+        [InlineKeyboardButton("Send All", callback_data="send_all"), InlineKeyboardButton("Languages", callback_data="filter_lang"), InlineKeyboardButton("Years", callback_data="filter_years")],
+        [InlineKeyboardButton("Quality", callback_data="filter_quality"), InlineKeyboardButton("Episodes", callback_data="filter_episodes"), InlineKeyboardButton("Seasons", callback_data="filter_seasons")],
+        [InlineKeyboardButton("PAGE", callback_data="noop"), InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"), InlineKeyboardButton("NEXT ➔", callback_data="next_page")]
     ])
     return InlineKeyboardMarkup(buttons)
