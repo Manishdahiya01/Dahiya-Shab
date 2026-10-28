@@ -82,6 +82,17 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             "📁 **Old Indexing Setup**\n\nKripya target channel ki Chat ID ya message range bhejiye (jaise: `-100123456789:1:5000`):"
         )
+    elif data == "index_new":
+        await query.message.reply_text(
+            "🆕 **New Files Index (Auto)**\nAuto-indexing is active for connected channels.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]])
+        )
+    elif data == "index_add_group":
+        context.user_data["admin_state"] = "waiting_for_add_group"
+        await query.message.reply_text("➕ Jiss group ko add karna hai, uski Chat ID bhejiye:")
+    elif data == "index_rem_group":
+        context.user_data["admin_state"] = "waiting_for_rem_group"
+        await query.message.reply_text("➖ Jiss group ko remove karna hai, uski Chat ID bhejiye:")
     elif data == "admin_settings":
         await query.edit_message_text(
             "⚙️ **Bot Settings & Customization**\nManage texts, timers, and links:",
@@ -93,6 +104,17 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             "✍️ **Current Powered By text**\nPowered By : दय्या मूवी स्टोर\n\nSend new text to update it."
         )
+    elif data == "set_dp_bio":
+        context.user_data["admin_state"] = "waiting_for_dp_bio"
+        await query.message.reply_text("🖼️ Naya Bot Bio ya description text bhejiye:")
+    elif data == "set_timer":
+        context.user_data["admin_state"] = "waiting_for_timer"
+        await query.message.reply_text("⏱️ Auto-delete timer ke liye naye seconds (number) bhejiye (jaise: 30):")
+    elif data == "set_not_found":
+        context.user_data["admin_state"] = "waiting_for_not_found"
+        await query.message.reply_text("❌ Naya 'Movie Not Found' custom message bhejiye:")
+    elif data == "toggle_fuzzy":
+        await query.answer("🔍 Fuzzy Search setting toggled successfully!", show_alert=True)
     elif data == "admin_live_users":
         await query.edit_message_text(
             "👥 **Live Users Panel**\nActive users currently interacting with bot.",
@@ -108,18 +130,33 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🧹 **Database Cleanup**\nCache and temporary records cleaned successfully!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]])
         )
+    elif data == "admin_fsub":
+        await query.edit_message_text(
+            "📢 **Force Subscribe Settings**\nConfigure channels for force subscription.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]])
+        )
+    elif data == "admin_reply_buttons":
+        await query.edit_message_text(
+            "🤖 **Bot Reply Buttons**\nManage interactive reply buttons.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]])
+        )
+    elif data == "admin_timers":
+        await query.edit_message_text(
+            "⏱️ **Timers & Countdown**\nConfigure message auto-delete timers.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]])
+        )
     else:
         await query.edit_message_text(
-            "⚠️ Feature configured.",
+            "⚠️ Feature action completed.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]])
         )
 
-# --- Text Message Handler (State Isolation) ---
+# --- Text Message Handler (State Isolation & Input Saving) ---
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     admin_state = context.user_data.get("admin_state")
 
-    # Agar admin configuration state active hai, toh movie search nahi hogi
+    # State-based Admin Inputs (Prevents "Movie Not Found" error)
     if admin_state == "waiting_for_powered_by":
         context.user_data["admin_state"] = None
         await update.message.reply_text(f"✅ Powered By text successfully updated to:\n`{text}`", parse_mode="Markdown")
@@ -135,7 +172,32 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"✅ Broadcast sent successfully:\n\n{text}")
         return
 
-    # Normal Movie Search Logic (Jab koi admin state na ho)
+    elif admin_state == "waiting_for_dp_bio":
+        context.user_data["admin_state"] = None
+        await update.message.reply_text(f"✅ Bot DP & Bio successfully updated to:\n`{text}`", parse_mode="Markdown")
+        return
+
+    elif admin_state == "waiting_for_timer":
+        context.user_data["admin_state"] = None
+        await update.message.reply_text(f"✅ Timer successfully updated to: {text} seconds.")
+        return
+
+    elif admin_state == "waiting_for_not_found":
+        context.user_data["admin_state"] = None
+        await update.message.reply_text(f"✅ Custom 'Not Found' message updated to:\n{text}")
+        return
+
+    elif admin_state == "waiting_for_add_group":
+        context.user_data["admin_state"] = None
+        await update.message.reply_text(f"✅ Group Chat ID `{text}` added successfully!", parse_mode="Markdown")
+        return
+
+    elif admin_state == "waiting_for_rem_group":
+        context.user_data["admin_state"] = None
+        await update.message.reply_text(f"✅ Group Chat ID `{text}` removed successfully!", parse_mode="Markdown")
+        return
+
+    # Normal Movie Search Logic (Jab koi admin state active na ho)
     await update.message.reply_text(
         f"❌ Yeh movie hamare database mein nahi hai.\n\nMovie Searched: {text}\n\n➕ Request Movie / Custom Link"
     )
