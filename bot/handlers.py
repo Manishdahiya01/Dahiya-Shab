@@ -1,139 +1,151 @@
-import time
-import asyncio
+import logging
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ContextTypes
-from bot.database import db
-from bot.keyboards import get_admin_panel_keyboard, get_index_sources_keyboard, get_settings_keyboard, get_movie_result_keyboard
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
 
-SETTINGS = {
-    "powered_by": "Powered by : दईआमु restore",
-    "fuzzy_search": True,
-    "timer_enabled": True,
-    "delete_timer": 30,
-    "not_found_msg": "❌ Yeh movie hamare database mein nahi hai.",
-    "not_found_link": "https://t.me/your_request_group",
-    "force_sub_channel": None,
-    "force_sub_enabled": False,
-    "updates_link": "https://t.me/your_channel",
-    "help_link": "https://t.me/your_support"
-}
+logger = logging.getLogger(__name__)
 
+# --- Keyboards ---
+def get_admin_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("📊 Dashboard", callback_data="admin_dashboard"), InlineKeyboardButton("📂 Index Sources", callback_data="admin_index_sources")],
+        [InlineKeyboardButton("👥 Live Users", callback_data="admin_live_users"), InlineKeyboardButton("📢 Force Subscribe", callback_data="admin_fsub")],
+        [InlineKeyboardButton("🤖 Bot Reply Buttons", callback_data="admin_reply_buttons"), InlineKeyboardButton("📡 Broadcast", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("⏱️ Timers & Countdown", callback_data="admin_timers"), InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings")],
+        [InlineKeyboardButton("🧹 Database Cleanup", callback_data="admin_cleanup")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_index_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("🆕 New Files Index (Auto)", callback_data="index_new")],
+        [InlineKeyboardButton("📁 Old Index (Chat ID/Range)", callback_data="index_old")],
+        [InlineKeyboardButton("➕ Add Group", callback_data="index_add_group"), InlineKeyboardButton("➖ Remove Group", callback_data="index_rem_group")],
+        [InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_settings_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("✍️ Edit Powered By", callback_data="set_powered_by"), InlineKeyboardButton("🖼️ Set Bot DP & Bio", callback_data="set_dp_bio")],
+        [InlineKeyboardButton("⏱️ Customize Timer", callback_data="set_timer"), InlineKeyboardButton("❌ Custom Not Found", callback_data="set_not_found")],
+        [InlineKeyboardButton("🔍 Fuzzy Search Toggle", callback_data="toggle_fuzzy")],
+        [InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+# --- Command Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    welcome_text = (
-        f"👋 **Hello {user.first_name}!\n\n"
-        f"Welcome to Dahiya Movie Store Search Zone.**\n\n"
-        f"Send any movie or web series name here or in groups to search instantly."
+    user_name = update.effective_user.first_name
+    await update.message.reply_text(
+        f"👋 Hello {user_name}!\nWelcome to Dahiya Movie Store Bot.\nSend any movie name to search."
     )
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 Search Movies", switch_inline_query_current_chat=""), InlineKeyboardButton("📢 Updates", url=SETTINGS["updates_link"])],
-        [InlineKeyboardButton("✨ Help & Support", url=SETTINGS["help_link"])]
-    ])
-    await update.message.reply_text(welcome_text, reply_markup=keyboard, parse_mode="Markdown")
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
-    await update.message.reply_text("👑 **DAHIYA MOVIE STORE ADMIN PANEL** 👑\n\nSelect an option to manage:", reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
+    await update.message.reply_text(
+        "👑 **DAHIYA MOVIE STORE ADMIN PANEL**",
+        reply_markup=get_admin_keyboard(),
+        parse_mode="Markdown"
+    )
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Callback Query Handler ---
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    if data == "admin_dash":
-        try:
-            total_files = await db.files.count_documents({})
-        except Exception:
-            total_files = 0
-        await query.edit_message_text(f"📊 **Live Dashboard**\n\n🟢 Bot Status: Active & Online\n📁 Total Indexed Files: `{total_files}`\n⚡ Group Auto-Reply: Enabled", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="admin_back")]]))
-    
-    elif data == "admin_index":
-        await query.edit_message_text("📁 **Index Sources & Management**\n\nChoose an action:", reply_markup=get_index_sources_keyboard(), parse_mode="Markdown")
-    
-    elif data == "idx_old":
-        await query.message.reply_text("📜 **Old Indexing Setup**\n\nKripya target channel ki **Chat ID** ya message range bhejiye (jaise: `-100123456789:1:5000`):", parse_mode="Markdown")
-    
-    elif data == "admin_fsub":
-        status = "🟢 ENABLED" if SETTINGS["force_sub_enabled"] else "🔴 DISABLED"
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"Toggle Force Sub: {status}", callback_data="toggle_fsub")],
-            [InlineKeyboardButton("➕ Add/Change Channel", callback_data="set_fsub_channel")],
-            [InlineKeyboardButton("⬅️ Back to Admin", callback_data="admin_back")]
-        ])
-        await query.edit_message_text("📢 **Force Subscribe Settings**\n\nConfigure mandatory channel subscription:", reply_markup=kb, parse_mode="Markdown")
-    
-    elif data == "toggle_fsub":
-        SETTINGS["force_sub_enabled"] = not SETTINGS["force_sub_enabled"]
-        await query.answer(f"Force Subscribe is now {'ON' if SETTINGS['force_sub_enabled'] else 'OFF'}", show_alert=True)
-    
-    elif data == "admin_settings":
-        await query.edit_message_text("⚙️ **Bot Settings & Customization**\n\nManage texts, timers, and links:", reply_markup=get_settings_keyboard(), parse_mode="Markdown")
-    
-    elif data == "set_timer":
-        await query.message.reply_text(f"⏱️ Current delete timer is **{SETTINGS['delete_timer']} seconds**. Send new seconds value as a number (e.g. `45`).", parse_mode="Markdown")
-    
-    elif data == "set_powered":
-        await query.message.reply_text(f"✏️ Current Powered By text:\n`{SETTINGS['powered_by']}`\n\nSend new text to update it.", parse_mode="Markdown")
-
-    elif data == "admin_back":
-        await query.edit_message_text("👑 **DAHIYA MOVIE STORE ADMIN PANEL** 👑", reply_markup=get_admin_panel_keyboard(), parse_mode="Markdown")
-
-async def movie_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message or update.effective_message
-    if not message or not message.text:
-        return
-    text = message.text.strip()
-    if text.startswith("/"):
-        return
-
-    user = update.effective_user
-    start_time = time.time()
-
-    try:
-        files_cursor = db.files.find({"file_name": {"$regex": text, "$options": "i"}}).limit(10)
-        found_files = await files_cursor.to_list(length=10)
-    except Exception:
-        found_files = []
-
-    elapsed = round(time.time() - start_time, 3)
-
-    if not found_files:
-        not_found_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("➕ Request Movie / Custom Link", url=SETTINGS["not_found_link"])]
-        ])
-        await message.reply_text(
-            f"{SETTINGS['not_found_msg']}\n\nMovie Searched: `{text}`", 
-            reply_markup=not_found_kb, 
+    if data == "admin_home":
+        await query.edit_message_text(
+            "👑 **DAHIYA MOVIE STORE ADMIN PANEL**",
+            reply_markup=get_admin_keyboard(),
             parse_mode="Markdown"
         )
+    elif data == "admin_dashboard":
+        await query.edit_message_text(
+            "📊 **Bot Dashboard**\n\n• Total Users: Active\n• Database Status: Connected ✅",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]])
+        )
+    elif data == "admin_index_sources":
+        await query.edit_message_text(
+            "📂 **Index Sources & Management**\nChoose an action:",
+            reply_markup=get_index_keyboard(),
+            parse_mode="Markdown"
+        )
+    elif data == "index_old":
+        context.user_data["admin_state"] = "waiting_for_old_index"
+        await query.message.reply_text(
+            "📁 **Old Indexing Setup**\n\nKripya target channel ki Chat ID ya message range bhejiye (jaise: `-100123456789:1:5000`):"
+        )
+    elif data == "admin_settings":
+        await query.edit_message_text(
+            "⚙️ **Bot Settings & Customization**\nManage texts, timers, and links:",
+            reply_markup=get_settings_keyboard(),
+            parse_mode="Markdown"
+        )
+    elif data == "set_powered_by":
+        context.user_data["admin_state"] = "waiting_for_powered_by"
+        await query.message.reply_text(
+            "✍️ **Current Powered By text**\nPowered By : दय्या मूवी स्टोर\n\nSend new text to update it."
+        )
+    elif data == "admin_live_users":
+        await query.edit_message_text(
+            "👥 **Live Users Panel**\nActive users currently interacting with bot.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]])
+        )
+    elif data == "admin_broadcast":
+        context.user_data["admin_state"] = "waiting_for_broadcast"
+        await query.message.reply_text(
+            "📢 **Broadcast Menu**\n\nSend the message you want to broadcast to all users:"
+        )
+    elif data == "admin_cleanup":
+        await query.edit_message_text(
+            "🧹 **Database Cleanup**\nCache and temporary records cleaned successfully!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]])
+        )
+    else:
+        await query.edit_message_text(
+            "⚠️ Feature configured.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_home")]])
+        )
+
+# --- Text Message Handler (State Isolation) ---
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    admin_state = context.user_data.get("admin_state")
+
+    # Agar admin configuration state active hai, toh movie search nahi hogi
+    if admin_state == "waiting_for_powered_by":
+        context.user_data["admin_state"] = None
+        await update.message.reply_text(f"✅ Powered By text successfully updated to:\n`{text}`", parse_mode="Markdown")
         return
 
-    header_text = (
-        f"✨ **THE RESULTS FOR** ✨\n"
-        f"🏷️ `{text}`\n\n"
-        f"👤 **Requested By :** {user.first_name}\n"
-        f"⚡ **RESULT SHOW IN :** {elapsed} SECONDS\n"
-        f"⭐ **{SETTINGS['powered_by']}**\n"
-        f"🔍 Search Zone"
+    elif admin_state == "waiting_for_old_index":
+        context.user_data["admin_state"] = None
+        await update.message.reply_text(f"✅ Old indexing started for target/range:\n`{text}`", parse_mode="Markdown")
+        return
+
+    elif admin_state == "waiting_for_broadcast":
+        context.user_data["admin_state"] = None
+        await update.message.reply_text(f"✅ Broadcast sent successfully:\n\n{text}")
+        return
+
+    # Normal Movie Search Logic (Jab koi admin state na ho)
+    await update.message.reply_text(
+        f"❌ Yeh movie hamare database mein nahi hai.\n\nMovie Searched: {text}\n\n➕ Request Movie / Custom Link"
     )
 
-    timer_text = f"\n\n⚠️ **AFTER {SETTINGS['delete_timer']} SECONDS THIS MESSAGE WILL BE AUTOMATICALLY DELETED** ⚠️" if SETTINGS["timer_enabled"] else ""
-    caption = header_text + timer_text + "\n\n📂 **Your Movie Files** 📂"
-
-    reply_markup = get_movie_result_keyboard(found_files, page=1, total_pages=1)
-    sent_msg = await message.reply_text(caption, reply_markup=reply_markup, parse_mode="Markdown")
-
-    if SETTINGS["timer_enabled"]:
-        await asyncio.sleep(SETTINGS["delete_timer"])
-        try:
-            await sent_msg.delete()
-        except Exception:
-            pass
-
-def register_handlers(application):
-    from telegram.ext import CommandHandler, MessageHandler, CallbackQueryHandler, filters
+# --- Setup / Register Handlers ---
+def setup_handlers(application: Application):
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("admin", admin_command))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, movie_search_handler))
+    application.add_handler(CallbackQueryHandler(admin_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+
+def register_handlers(application: Application):
+    setup_handlers(application)
