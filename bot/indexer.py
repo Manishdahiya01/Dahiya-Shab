@@ -1,17 +1,33 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.types import InputMessagesFilterDocument
 
 from .config import Config
 from .database import Database, utc_now
 from .metadata import parse_metadata
 
 logger = logging.getLogger(__name__)
+
+
+def _index_progress_text(title: str, job: dict[str, Any]) -> str:
+    total = job.get("files_total")
+    total_label = str(total) if total is not None else "?"
+    return (
+        f"📈 OLD FILE INDEXING\n{title[:120]}\n"
+        f"Status: {str(job.get('status', 'running')).upper()}\n"
+        f"Files processed: {job.get('files_processed', 0)}/{total_label}\n"
+        f"Indexed/updated: {job.get('indexed', 0)}\n"
+        f"Skipped: {job.get('skipped', 0)}\n"
+        f"Errors: {job.get('errors', 0)}"
+        + (f"\nLast error: {str(job['error'])[:300]}" if job.get("error") else "")
+    )
 
 
 def _telethon_document(message: Any) -> dict[str, Any] | None:
@@ -119,58 +135,113 @@ class HistoricalIndexer:
         self.running_chats.add(normalized_chat_id)
         job_id = f"{normalized_chat_id}:{int(datetime.now(timezone.utc).timestamp())}"
         started = utc_now()
-        await self.db.set_index_job(
-            job_id,
-            {
-                "chat_id": normalized_chat_id,
-                "status": "running",
-                "started_at": started,
-                "indexed": 0,
-                "last_message_id": 0,
-                "error": None,
-            },
-        )
-        count = 0
+        job: dict[str, Any] = {
+            "chat_id": normalized_chat_id,
+            "status": "running",
+            "started_at": started,
+            "files_total": None,
+            "files_processed": 0,
+            "indexed": 0,
+            "skipped": 0,
+            "errors": 0,
+            "last_message_id": 0,
+            "error": None,
+        }
+        progress_message_id: int | None = None
+        source: dict[str, Any] = {"title": normalized_chat_id}
         try:
             source = await self.db.sources.find_one({"chat_id": normalized_chat_id})
             if not source:
                 raise RuntimeError("This source is not registered in Index groups.")
             entity = await self.client.get_entity(int(normalized_chat_id))
-            await self.bot.send_message(
-                admin_chat_id,
-                f"Old-file indexing started for {source.get('title', normalized_chat_id)}. Existing index records will be updated, not cleared.",
+            file_count = await self.client.get_messages(
+                entity,
+                limit=0,
+                filter=InputMessagesFilterDocument(),
             )
-            async for message in self.client.iter_messages(entity, reverse=True):
-                if not message.media:
-                    continue
-                if await self.index_telethon_message(message, normalized_chat_id, source):
-                    count += 1
-                    if count % 100 == 0:
-                        await self.db.set_index_job(
-                            job_id,
-                            {"indexed": count, "last_message_id": int(message.id), "updated_at": utc_now()},
-                        )
-                        await self.bot.send_message(admin_chat_id, f"Indexing progress: {count} files indexed.")
+            job["files_total"] = max(0, int(getattr(file_count, "total", 0) or 0))
+            await self.db.set_index_job(job_id, job)
+            try:
+                progress_message = await self.bot.send_message(
+                    admin_chat_id,
+                    _index_progress_text(source.get("title", normalized_chat_id), job),
+                )
+                progress_message_id = progress_message.message_id
+            except Exception:
+                logger.exception("Could not send historical-index progress message.")
+
+            last_update = time.monotonic()
+            async for message in self.client.iter_messages(
+                entity,
+                reverse=True,
+                filter=InputMessagesFilterDocument(),
+            ):
+                job["files_processed"] += 1
+                job["last_message_id"] = int(message.id)
+                try:
+                    if await self.index_telethon_message(message, normalized_chat_id, source):
+                        job["indexed"] += 1
+                    else:
+                        job["skipped"] += 1
+                except Exception as exc:
+                    job["errors"] += 1
+                    job["error"] = str(exc)[:500]
+                    raise
+
+                if job["files_processed"] % 25 == 0 or time.monotonic() - last_update >= 5:
+                    job["updated_at"] = utc_now()
+                    await self.db.set_index_job(job_id, job)
+                    if progress_message_id:
+                        try:
+                            await self.bot.edit_message_text(
+                                chat_id=admin_chat_id,
+                                message_id=progress_message_id,
+                                text=_index_progress_text(source.get("title", normalized_chat_id), job),
+                            )
+                        except Exception:
+                            logger.debug("Could not update historical-index progress message.", exc_info=True)
+                    last_update = time.monotonic()
+
+            job.update({"status": "completed", "finished_at": utc_now(), "updated_at": utc_now()})
             await self.db.set_index_job(
                 job_id,
-                {
-                    "status": "completed",
-                    "indexed": count,
-                    "finished_at": utc_now(),
-                    "updated_at": utc_now(),
-                },
+                job,
             )
-            await self.bot.send_message(admin_chat_id, f"Historical indexing finished. {count} files added or refreshed.")
+            if progress_message_id:
+                try:
+                    await self.bot.edit_message_text(
+                        chat_id=admin_chat_id,
+                        message_id=progress_message_id,
+                        text=_index_progress_text(source.get("title", normalized_chat_id), job),
+                    )
+                except Exception:
+                    logger.debug("Could not publish completed historical-index summary.", exc_info=True)
         except Exception as exc:
             logger.exception("Historical indexing failed for source %s.", normalized_chat_id)
+            job["status"] = "failed"
+            if not job["errors"]:
+                job["errors"] = 1
+            job["error"] = str(exc)[:500]
+            job["finished_at"] = utc_now()
+            job["updated_at"] = utc_now()
             await self.db.set_index_job(
                 job_id,
-                {"status": "failed", "indexed": count, "error": str(exc)[:500], "finished_at": utc_now()},
+                job,
             )
-            await self.bot.send_message(
-                admin_chat_id,
-                f"Historical indexing stopped after {count} files: {str(exc)[:300]}",
-            )
+            if progress_message_id:
+                try:
+                    await self.bot.edit_message_text(
+                        chat_id=admin_chat_id,
+                        message_id=progress_message_id,
+                        text=_index_progress_text(source.get("title", normalized_chat_id), job),
+                    )
+                except Exception:
+                    logger.debug("Could not publish failed historical-index summary.", exc_info=True)
+            else:
+                try:
+                    await self.bot.send_message(admin_chat_id, _index_progress_text("Indexing", job))
+                except Exception:
+                    logger.exception("Could not send historical-index failure summary.")
         finally:
             self.running_chats.discard(normalized_chat_id)
 

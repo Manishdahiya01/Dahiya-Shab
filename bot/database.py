@@ -19,6 +19,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "auto_delete": {"enabled": False, "seconds": 300},
     "subscription": {"enabled": False},
     "new_indexing_enabled": True,
+    "group_search_enabled": True,
     "fuzzy_search_enabled": True,
     "powered_by": "Dahiya Movie Store | Search Zone",
     "welcome_message": "Send a movie or series name to search the indexed files.",
@@ -373,22 +374,44 @@ class Database:
     async def get_latest_index_job(self, chat_id: int | str) -> dict[str, Any] | None:
         return await self.index_jobs.find_one({"chat_id": str(chat_id)}, sort=[("started_at", DESCENDING)])
 
-    async def save_bot_group(self, chat_id: int | str, title: str, chat_type: str) -> None:
+    async def save_bot_group(
+        self,
+        chat_id: int | str,
+        title: str,
+        chat_type: str,
+        bot_status: str | None = None,
+        added_by_id: int | None = None,
+        added_by_name: str | None = None,
+        added_by_username: str | None = None,
+    ) -> None:
+        values: dict[str, Any] = {
+            "chat_id": str(chat_id),
+            "title": title[:160],
+            "type": chat_type,
+            "updated_at": utc_now(),
+        }
+        if bot_status is not None:
+            values["bot_status"] = bot_status
+        if added_by_id is not None:
+            values["added_by_id"] = int(added_by_id)
+        if added_by_name:
+            values["added_by_name"] = added_by_name[:160]
+        if added_by_username:
+            values["added_by_username"] = added_by_username.lstrip("@")[:64]
         await self.bot_groups.update_one(
             {"chat_id": str(chat_id)},
-            {
-                "$set": {
-                    "chat_id": str(chat_id),
-                    "title": title[:160],
-                    "type": chat_type,
-                    "updated_at": utc_now(),
-                }
-            },
+            {"$set": values},
             upsert=True,
         )
 
+    async def get_bot_group(self, chat_id: int | str) -> dict[str, Any] | None:
+        return await self.bot_groups.find_one({"chat_id": str(chat_id)})
+
     async def get_bot_groups(self) -> list[dict[str, Any]]:
         return await self.bot_groups.find().sort("title", ASCENDING).to_list(length=500)
+
+    async def count_bot_groups(self) -> int:
+        return await self.bot_groups.count_documents({})
 
     async def remove_bot_group(self, chat_id: int | str) -> bool:
         result = await self.bot_groups.delete_one({"chat_id": str(chat_id)})

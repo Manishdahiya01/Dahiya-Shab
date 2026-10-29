@@ -7,6 +7,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 def admin_home(settings: dict[str, Any]) -> InlineKeyboardMarkup:
     bot_label = "Bot: ON" if settings.get("bot_enabled", True) else "Bot: OFF"
+    group_replies_label = (
+        f"Group replies: {'ON' if settings.get('group_search_enabled', True) else 'OFF'}"
+    )
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton(f"👑 DAHIYA MOVIE STORE ADMIN · {bot_label}", callback_data="adm:dashboard")],
@@ -17,10 +20,9 @@ def admin_home(settings: dict[str, Any]) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🔎 User Search Requests", callback_data="adm:requests:0"),
              InlineKeyboardButton("📢 Broadcast", callback_data="adm:broadcast")],
             [InlineKeyboardButton("👨‍👩‍👧 Bot Groups", callback_data="adm:groups"),
-             InlineKeyboardButton("🧾 Duplicate Files", callback_data="adm:duplicates")],
+             InlineKeyboardButton(group_replies_label, callback_data="adm:toggle_group_search")],
             [InlineKeyboardButton("⏱ Timers & Countdown", callback_data="adm:timers"),
              InlineKeyboardButton("⚙️ Settings", callback_data="adm:settings")],
-            [InlineKeyboardButton("🧹 Database Cleanup", callback_data="adm:cleanup")],
         ]
     )
 
@@ -94,18 +96,32 @@ def source_list(
     return InlineKeyboardMarkup(rows)
 
 
-def subscription_list(channels: list[dict[str, Any]], enabled: bool) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(f"Remove {row.get('title') or row['chat_id']}"[:60], callback_data=f"adm:del_sub:{row['chat_id']}")]
-        for row in channels[:20]
-    ]
-    rows.extend(
+def subscription_list(enabled: bool) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton(f"Force-sub: {'ON' if enabled else 'OFF'}", callback_data="adm:toggle_subscription")],
-            [InlineKeyboardButton("Add required channel", callback_data="adm:add_sub")],
+            [
+                InlineKeyboardButton("➕ Add link", callback_data="adm:add_sub"),
+                InlineKeyboardButton("➖ Remove link", callback_data="adm:remove_sub"),
+            ],
             [InlineKeyboardButton("Back", callback_data="adm:home")],
         ]
     )
+
+
+def subscription_remove_list(channels: list[dict[str, Any]]) -> InlineKeyboardMarkup:
+    rows = []
+    for start in range(0, len(channels), 2):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"🗑 {row.get('title') or row['chat_id']}"[:30],
+                    callback_data=f"adm:del_sub:{row['chat_id']}",
+                )
+                for row in channels[start : start + 2]
+            ]
+        )
+    rows.append([InlineKeyboardButton("⬅ Back to Force-sub", callback_data="adm:subscription")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -137,33 +153,30 @@ def results_keyboard(
     total: int,
     filter_values: dict[str, list[str]] | None = None,
 ) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    filters = filter_values or {}
-    filter_buttons = []
-    for label, key in (
-        ("🌐 Languages", "languages"),
-        ("📅 Years", "year"),
-        ("🎞 Quality", "quality"),
-        ("📺 Episodes", "episode"),
-        ("🍿 Seasons", "season"),
-    ):
-        values = filters.get(key, [])
-        if values:
-            filter_buttons.append(InlineKeyboardButton(label, callback_data=f"filter:{key}"))
-    if filter_buttons:
-        for start in range(0, len(filter_buttons), 2):
-            rows.append(filter_buttons[start : start + 2])
-
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"page:{page - 1}"))
-    if (page + 1) * 10 < total:
-        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"page:{page + 1}"))
     total_pages = max(1, (total + 9) // 10)
-    rows.insert(0, [InlineKeyboardButton("📤 Send All (up to 10)", callback_data="send_all")])
-    rows.append([InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="page:picker")])
-    if nav:
-        rows.append(nav)
+    page = max(0, min(page, total_pages - 1))
+    page_control = InlineKeyboardButton(
+        "PAGE" if page == 0 else "PREVIOUS ←",
+        callback_data="page:picker" if page == 0 else f"page:{page - 1}",
+    )
+    page_count = InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="page:picker")
+    page_row = [page_control, page_count]
+    if page + 1 < total_pages:
+        page_row.append(InlineKeyboardButton("NEXT ➪", callback_data=f"page:{page + 1}"))
+
+    rows = [
+        [
+            InlineKeyboardButton("Send All", callback_data="send_all"),
+            InlineKeyboardButton("LANGUAGES", callback_data="filter:languages"),
+            InlineKeyboardButton("YEARS", callback_data="filter:year"),
+        ],
+        [
+            InlineKeyboardButton("QUALITY", callback_data="filter:quality"),
+            InlineKeyboardButton("EPISODES", callback_data="filter:episode"),
+            InlineKeyboardButton("SEASONS", callback_data="filter:season"),
+        ],
+        page_row,
+    ]
     rows.append([InlineKeyboardButton("🔎 Back to search", callback_data="search:back")])
     return InlineKeyboardMarkup(rows)
 
@@ -178,7 +191,7 @@ def filter_options_keyboard(kind: str, values: list[str]) -> InlineKeyboardMarku
                 for idx, value in enumerate(pair)
             ]
         )
-    rows.append([InlineKeyboardButton("Back", callback_data="search:results")])
+    rows.append([InlineKeyboardButton("⬅ Back to results", callback_data="search:results")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -196,6 +209,6 @@ def page_picker_keyboard(total: int, current_page: int) -> InlineKeyboardMarkup:
                 for page in list(pages)[start : start + 5]
             ]
         )
-    rows.append([InlineKeyboardButton("Back to results", callback_data="search:results")])
+    rows.append([InlineKeyboardButton("⬅ Back to results", callback_data="search:results")])
     return InlineKeyboardMarkup(rows)
 

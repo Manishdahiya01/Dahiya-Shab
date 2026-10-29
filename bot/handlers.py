@@ -22,7 +22,7 @@ from telegram.ext import (
     filters,
 )
 
-from .database import Database, utc_now
+from .database import Database, movie_key, utc_now
 from .indexer import HistoricalIndexer
 from .keyboards import (
     admin_home,
@@ -34,6 +34,7 @@ from .keyboards import (
     settings_menu,
     source_list,
     subscription_list,
+    subscription_remove_list,
     timer_menu,
 )
 from .metadata import parse_metadata
@@ -91,8 +92,26 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not settings.get("bot_enabled", True) and not _is_admin(user.id if user else None, admins):
         await update.effective_message.reply_text("The bot is temporarily paused. Please try again later.")
         return
+    payload = context.args[0] if context.args else ""
+    file_key = None
+    if payload.startswith("file_"):
+        file_key = payload.removeprefix("file_")
+        if not re.fullmatch(r"[0-9a-fA-F]{16}", file_key):
+            await update.effective_message.reply_text("This file link is invalid or expired.")
+            return
+
     if not _is_admin(user.id if user else None, admins) and not await _is_subscribed(update, context, db):
+        if file_key:
+            context.user_data["pending_file_key"] = file_key
         await _show_join_gate(update, context, db)
+        return
+
+    if file_key:
+        item = await db.get_movie(file_key)
+        if not item:
+            await update.effective_message.reply_text("This indexed file is no longer available.")
+            return
+        await _deliver_movie(update, context, db, item)
         return
 
     description = settings.get("bot_description") or "Search Dahiya Movie Store"
@@ -154,7 +173,18 @@ def _not_found_keyboard(settings: dict[str, Any]) -> InlineKeyboardMarkup | None
     return None
 
 
-def _result_line(item: dict[str, Any]) -> str:
+async def _bot_username(context: ContextTypes.DEFAULT_TYPE) -> str:
+    username = context.bot_data.get("bot_username")
+    if not username:
+        bot_user = await context.bot.get_me()
+        username = bot_user.username
+        if not username:
+            raise RuntimeError("Telegram did not return a username for this bot.")
+        context.bot_data["bot_username"] = username
+    return str(username).lstrip("@")
+
+
+def _result_line(item: dict[str, Any], bot_username: str) -> str:
     label = item.get("filename") or item.get("title") or "Indexed file"
     details = []
     size = item.get("size")
@@ -176,7 +206,11 @@ def _result_line(item: dict[str, Any]) -> str:
     if item.get("episode") is not None:
         details.append(f"E{item['episode']}")
     suffix = f" · {' · '.join(details)[:120]}" if details else ""
-    url = escape(_source_link(item), quote=True)
+    file_key = str(
+        item.get("file_key")
+        or movie_key(item["source_chat_id"], int(item["source_message_id"]))
+    )
+    url = escape(f"https://t.me/{bot_username}?start=file_{file_key}", quote=True)
     return f'🔹 <a href="{url}">{escape(str(label)[:200])}</a>{escape(suffix)}'
 
 
@@ -273,8 +307,9 @@ async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, db: 
     )
     lines = []
     used_chars = len(header)
+    bot_username = await _bot_username(context)
     for item in page_items:
-        line = _result_line(item)
+        line = _result_line(item, bot_username)
         if used_chars + len(line) + 1 > 3800:
             break
         lines.append(line)
@@ -399,6 +434,46 @@ async def _prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, state: str
     await update.callback_query.message.reply_text(text)
 
 
+def _subscription_count_text(channels: list[dict[str, Any]]) -> str:
+    return f"Total links: {len(channels)}"
+
+
+def _group_added_by_label(group: dict[str, Any]) -> str:
+    name = str(group.get("added_by_name") or "").strip()
+    username = str(group.get("added_by_username") or "").strip().lstrip("@")
+    user_id = group.get("added_by_id")
+    if name and username:
+        return f"{name} (@{username})"
+    if username:
+        return f"@{username}"
+    if name:
+        return name
+    if user_id:
+        return f"Telegram user {user_id}"
+    return "Not recorded"
+
+
+def _index_job_status_line(title: str, job: dict[str, Any]) -> str:
+    status = str(job.get("status", "unknown")).upper()
+    if "files_processed" in job:
+        total = job.get("files_total")
+        total_label = str(total) if total is not None else "?"
+        line = (
+            f"• {title[:70]}: {status} — "
+            f"{job.get('files_processed', 0)}/{total_label} files processed; "
+            f"{job.get('indexed', 0)} indexed, {job.get('skipped', 0)} skipped, "
+            f"{job.get('errors', 0)} errors"
+        )
+    else:
+        line = (
+            f"• {title[:70]}: {status} — {job.get('indexed', 0)} files indexed; "
+            "total unavailable for this older scan"
+        )
+    if job.get("error"):
+        line += f" — {str(job['error'])[:100]}"
+    return line
+
+
 async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
     db, indexer, admins = _services(context)
     query = update.callback_query
@@ -412,6 +487,14 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     if data == "adm:home":
         await query.edit_message_text("👑 DAHIYA MOVIE STORE — ADMIN PANEL", reply_markup=admin_home(settings))
+    elif data == "adm:toggle_group_search":
+        enabled = not settings.get("group_search_enabled", True)
+        await db.update_settings({"group_search_enabled": enabled})
+        updated = await db.get_settings()
+        await query.edit_message_text(
+            f"Group replies are now {'ON' if enabled else 'OFF'}.",
+            reply_markup=admin_home(updated),
+        )
     elif data == "adm:toggle_bot":
         enabled = not settings.get("bot_enabled", True)
         await db.update_settings({"bot_enabled": enabled})
@@ -482,19 +565,29 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(text[:3900], reply_markup=InlineKeyboardMarkup(rows_markup))
     elif data == "adm:groups":
         groups = await db.get_bot_groups()
+        total_groups = await db.count_bot_groups()
+        shown_groups = groups[:20]
         rows = [
             [InlineKeyboardButton(
                 f"Leave {item.get('title') or item['chat_id']}"[:55],
                 callback_data=f"adm:group_leave_confirm:{item['chat_id']}",
             )]
-            for item in groups[:20]
+            for item in shown_groups
         ]
         rows.append([InlineKeyboardButton("Back", callback_data="adm:home")])
-        text = (
-            "👨‍👩‍👧 BOT GROUPS\nChoose a group to remove the bot from."
-            if groups
-            else "The bot has not recorded any groups yet."
-        )
+        group_lines = [
+            f"• {str(item.get('title') or item['chat_id'])[:45]} — added by: "
+            f"{_group_added_by_label(item)[:80]}"
+            for item in shown_groups
+        ]
+        text = f"👨‍👩‍👧 BOT GROUPS · {total_groups} total\n\n"
+        if group_lines:
+            text += "\n".join(group_lines)
+            if total_groups > len(shown_groups):
+                text += f"\n\nShowing first {len(shown_groups)} groups."
+            text += "\n\nTap a group below to remove the bot."
+        else:
+            text += "The bot has not recorded any groups yet."
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
     elif data.startswith("adm:group_leave_confirm:"):
         chat_id = data.rsplit(":", 1)[1]
@@ -582,15 +675,16 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
             job = await db.get_latest_index_job(source["chat_id"])
             title = source.get("title") or source["chat_id"]
             if job:
-                line = f"• {title}: {job.get('status', 'unknown')} — {job.get('indexed', 0)} files"
-                if job.get("error"):
-                    line += f" — {job['error'][:100]}"
+                line = _index_job_status_line(title, job)
             else:
                 line = f"• {title}: no historical scan recorded"
             lines.append(line)
         text = "📈 INDEXING PROGRESS\n" + ("\n".join(lines) if lines else "No index sources configured.")
+        rendered_text = text[:3900]
+        if query.message and query.message.text == rendered_text:
+            return
         await query.edit_message_text(
-            text[:3900],
+            rendered_text,
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("🔄 Refresh", callback_data="adm:index_status")],
                  [InlineKeyboardButton("Back", callback_data="adm:sources")]]
@@ -690,9 +784,10 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "adm:toggle_subscription":
         enabled = not settings.get("subscription", {}).get("enabled", False)
         await db.update_settings({"subscription.enabled": enabled})
+        channels = await db.get_subscriptions()
         await query.edit_message_text(
-            f"Force-subscription is now {'ON' if enabled else 'OFF'}.",
-            reply_markup=subscription_list(await db.get_subscriptions(), enabled),
+            f"Force-subscription is now {'ON' if enabled else 'OFF'}.\n{_subscription_count_text(channels)}",
+            reply_markup=subscription_list(enabled),
         )
     elif data == "adm:timer":
         seconds = settings.get("auto_delete", {}).get("seconds", 300)
@@ -864,7 +959,23 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "adm:subscription":
         channels = await db.get_subscriptions()
         enabled = settings.get("subscription", {}).get("enabled", False)
-        await query.edit_message_text("Force-subscription channels", reply_markup=subscription_list(channels, enabled))
+        await query.edit_message_text(
+            f"Force-subscription links\n{_subscription_count_text(channels)}",
+            reply_markup=subscription_list(enabled),
+        )
+    elif data == "adm:remove_sub":
+        channels = await db.get_subscriptions()
+        enabled = settings.get("subscription", {}).get("enabled", False)
+        if not channels:
+            await query.edit_message_text(
+                f"There are no force-subscription links to remove.\n{_subscription_count_text(channels)}",
+                reply_markup=subscription_list(enabled),
+            )
+        else:
+            await query.edit_message_text(
+                f"Choose the link to remove.\n{_subscription_count_text(channels)}",
+                reply_markup=subscription_remove_list(channels),
+            )
     elif data == "adm:add_sub":
         await _prompt(
             update,
@@ -875,9 +986,11 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif data.startswith("adm:del_sub:"):
         chat_id = data[len("adm:del_sub:"):]
         removed = await db.remove_subscription(chat_id)
+        channels = await db.get_subscriptions()
+        updated_settings = await db.get_settings()
         await query.edit_message_text(
-            "Subscription channel removed." if removed else "Channel was not found.",
-            reply_markup=subscription_list(await db.get_subscriptions(), (await db.get_settings()).get("subscription", {}).get("enabled", False)),
+            f"{'Subscription link removed.' if removed else 'Link was not found.'}\n{_subscription_count_text(channels)}",
+            reply_markup=subscription_list(updated_settings.get("subscription", {}).get("enabled", False)),
         )
     elif data == "adm:broadcast":
         context.user_data["admin_state"] = "broadcast_text"
@@ -1028,7 +1141,12 @@ async def _handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE,
             chat = await context.bot.get_chat(chat_id)
             await db.save_subscription(str(chat.id), chat.title or chat.username or chat_id, join_url)
             context.user_data.pop("admin_state", None)
-            await update.effective_message.reply_text("Required channel added.", reply_markup=subscription_list(await db.get_subscriptions(), (await db.get_settings()).get("subscription", {}).get("enabled", False)))
+            channels = await db.get_subscriptions()
+            updated_settings = await db.get_settings()
+            await update.effective_message.reply_text(
+                f"Required channel added.\n{_subscription_count_text(channels)}",
+                reply_markup=subscription_list(updated_settings.get("subscription", {}).get("enabled", False)),
+            )
         except TelegramError:
             logger.exception("Could not add force-subscription channel %s.", chat_id)
             await update.effective_message.reply_text("Telegram could not access that channel. Add the bot there as an administrator and verify the chat ID.")
@@ -1122,13 +1240,48 @@ async def bot_membership_update(update: Update, context: ContextTypes.DEFAULT_TY
     db, _, _ = _services(context)
     status = change.new_chat_member.status
     if status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR):
+        existing = await db.get_bot_group(change.chat.id)
+        actor = change.from_user
+        added_by_id = existing.get("added_by_id") if existing else None
+        added_by_name = existing.get("added_by_name") if existing else None
+        added_by_username = existing.get("added_by_username") if existing else None
+        if actor and not added_by_id:
+            added_by_id = actor.id
+            added_by_name = " ".join(filter(None, [actor.first_name, actor.last_name])) or None
+            added_by_username = actor.username
         await db.save_bot_group(
             change.chat.id,
             change.chat.title or change.chat.username or str(change.chat.id),
             change.chat.type,
+            str(status),
+            added_by_id,
+            added_by_name,
+            added_by_username,
         )
-    elif status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+    else:
         await db.remove_bot_group(change.chat.id)
+
+
+async def _bot_is_group_admin(message: Any, context: ContextTypes.DEFAULT_TYPE, db: Database) -> bool:
+    group = await db.get_bot_group(message.chat.id)
+    if group and group.get("bot_status"):
+        return group["bot_status"] == ChatMemberStatus.ADMINISTRATOR
+
+    # Older group records do not store the bot's membership status.
+    try:
+        membership = await context.bot.get_chat_member(message.chat.id, context.bot.id)
+    except TelegramError:
+        logger.exception("Could not verify the bot's admin status in group %s.", message.chat.id)
+        return False
+
+    status = membership.status
+    await db.save_bot_group(
+        message.chat.id,
+        message.chat.title or message.chat.username or str(message.chat.id),
+        message.chat.type,
+        str(status),
+    )
+    return status == ChatMemberStatus.ADMINISTRATOR
 
 
 async def group_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1139,7 +1292,11 @@ async def group_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user = update.effective_user
     if message.text and not message.text.startswith("/") and user and not user.is_bot:
         settings = await db.get_settings()
+        if not settings.get("group_search_enabled", True):
+            return
         if not settings.get("bot_enabled", True) and not _is_admin(user.id, admins):
+            return
+        if not await _bot_is_group_admin(message, context, db):
             return
         if not _is_admin(user.id, admins) and not await _is_subscribed(update, context, db):
             await _show_join_gate(update, context, db)
@@ -1204,7 +1361,15 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.answer("Join the required channel(s) first.", show_alert=True)
             return
         await query.answer("Subscription confirmed.")
-        await query.message.reply_text("You are verified. Send a movie or series name to search.")
+        pending_file_key = context.user_data.pop("pending_file_key", None)
+        if pending_file_key:
+            item = await db.get_movie(pending_file_key)
+            if item:
+                await _deliver_movie(update, context, db, item)
+            else:
+                await query.message.reply_text("This indexed file is no longer available.")
+        else:
+            await query.message.reply_text("You are verified. Send a movie or series name to search.")
     elif data == "search:back":
         await query.answer()
         context.user_data.pop("search_hits", None)
@@ -1217,7 +1382,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         kind = data.split(":", 1)[1]
         values = context.user_data.get("filter_values", {}).get(kind, [])
         if not values:
-            await query.edit_message_text("No filter options are available for this result.")
+            await query.edit_message_text(
+                f"No {kind} options are indexed for these results.",
+                reply_markup=filter_options_keyboard(kind, []),
+            )
             return
         await query.edit_message_text(
             f"Choose {kind}:",
@@ -1300,7 +1468,7 @@ async def _deliver_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, db:
     settings = await db.get_settings()
     auto_delete = settings.get("auto_delete", {})
     try:
-        copied = await context.bot.copy_message(
+        forwarded = await context.bot.forward_message(
             chat_id=chat_id,
             from_chat_id=int(source_chat_id),
             message_id=int(item["source_message_id"]),
@@ -1311,17 +1479,23 @@ async def _deliver_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, db:
             status_message = await update.effective_message.reply_text(
                 f"Auto-delete in {seconds} seconds."
             )
-            await db.make_delivery(chat_id, copied.message_id, status_message.message_id, expires)
+            await db.make_delivery(chat_id, forwarded.message_id, status_message.message_id, expires)
     except TelegramError:
-        logger.exception("Bot API could not copy indexed message %s.", item.get("file_key"))
+        logger.exception("Bot API could not forward indexed message %s.", item.get("file_key"))
         url = _source_link(item)
         await update.effective_message.reply_text(
-            "I could not copy this file. Open the original source message instead.",
+            "I could not forward this file. The bot may need access to the source channel.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Open source file", url=url)]]),
         )
 
 
+def _is_message_not_modified_error(error: BaseException | None) -> bool:
+    return isinstance(error, BadRequest) and "message is not modified" in str(error).lower()
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if _is_message_not_modified_error(context.error):
+        return
     logger.error("Unhandled bot update error.", exc_info=context.error)
     if isinstance(update, Update) and update.effective_message:
         try:
