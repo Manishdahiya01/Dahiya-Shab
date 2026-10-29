@@ -352,19 +352,40 @@ def _quality_sort_key(value: str) -> tuple[int, str]:
 
 
 def _filter_values_for_hits(hits: list[dict[str, Any]]) -> dict[str, list[str]]:
+    fixed_languages = ["Hindi", "Hind", "English", "Eng"]
+    indexed_languages = {
+        lang
+        for item in hits
+        for lang in (item.get("languages") or [])
+        if lang
+    }
     return {
-        "languages": sorted({lang for item in hits for lang in item.get("languages", [])}),
-        "year": sorted(
-            {str(item["year"]) for item in hits if item.get("year") is not None},
-            key=int,
-        ),
-        "quality": sorted(
-            {item["quality"] for item in hits if item.get("quality")},
-            key=_quality_sort_key,
-        ),
+        "languages": fixed_languages + sorted(indexed_languages - set(fixed_languages)),
+        "year": [str(year) for year in range(1970, 2081)],
+        "quality": ["360P", "480P", "1080P", "4K"],
         "episode": [str(number) for number in range(1, 101)],
         "season": [str(number) for number in range(1, 51)],
     }
+
+
+def _matches_language_filter(item: dict[str, Any], selected: str) -> bool:
+    aliases = {
+        "Hindi": {"Hindi", "Hind"},
+        "Hind": {"Hindi", "Hind"},
+        "English": {"English", "Eng"},
+        "Eng": {"English", "Eng"},
+    }
+    languages = item.get("languages") or []
+    if isinstance(languages, str):
+        languages = [languages]
+    return bool(set(languages) & aliases.get(selected, {selected}))
+
+
+def _matches_quality_filter(item: dict[str, Any], selected: str) -> bool:
+    quality = str(item.get("quality") or "").upper()
+    if selected == "4K":
+        return quality in {"4K", "UHD", "2160P"}
+    return quality == selected
 
 
 def _hydrate_missing_filter_metadata(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -398,11 +419,11 @@ async def _send_results(
     filters = search_data.get("search_filters", {})
     for key, selected in filters.items():
         if key == "languages":
-            hits = [item for item in hits if selected in (item.get("languages") or [])]
+            hits = [item for item in hits if _matches_language_filter(item, selected)]
         elif key == "year":
             hits = [item for item in hits if str(item.get("year")) == selected]
         elif key == "quality":
-            hits = [item for item in hits if (item.get("quality") or "") == selected]
+            hits = [item for item in hits if _matches_quality_filter(item, selected)]
         elif key == "season":
             hits = [item for item in hits if str(item.get("season")) == selected]
         elif key == "episode":
@@ -1835,11 +1856,11 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         filters = search_data.get("search_filters", {})
         for key, selected in filters.items():
             if key == "languages":
-                hits = [item for item in hits if selected in (item.get("languages") or [])]
+                hits = [item for item in hits if _matches_language_filter(item, selected)]
             elif key == "year":
                 hits = [item for item in hits if str(item.get("year")) == selected]
             elif key == "quality":
-                hits = [item for item in hits if item.get("quality") == selected]
+                hits = [item for item in hits if _matches_quality_filter(item, selected)]
             elif key == "season":
                 hits = [item for item in hits if str(item.get("season")) == selected]
             elif key == "episode":
