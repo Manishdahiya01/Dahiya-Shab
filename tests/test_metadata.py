@@ -12,6 +12,11 @@ def test_parse_caption_fields() -> None:
     assert "dahiya movie" in result["normalized_title"]
 
 
+def test_parse_short_language_aliases() -> None:
+    result = parse_metadata("Shinchan Hind Eng")
+    assert result["languages"] == ["Hind", "Eng"]
+
+
 def test_filename_fallback() -> None:
     result = parse_metadata("", "Sample.Film.2021.720p.mkv")
     assert result["year"] == 2021
