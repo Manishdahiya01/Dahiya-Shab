@@ -8,6 +8,7 @@ from telegram.error import BadRequest, TelegramError
 from bot.admins import AdminRegistry
 from bot.handlers import (
     _deliver_movie,
+    _filter_values_for_hits,
     _group_added_by_label,
     _handle_admin_callback,
     _handle_admin_text,
@@ -22,6 +23,7 @@ from bot.handlers import (
     _check_subscriptions,
     _welcome_keyboard,
     bot_membership_update,
+    callback_router,
     channel_post,
     group_post,
     start_command,
@@ -96,6 +98,105 @@ def test_empty_filter_keyboard_keeps_a_back_button() -> None:
     assert len(keyboard.inline_keyboard) == 1
     assert keyboard.inline_keyboard[0][0].callback_data == "search:results"
     assert "Back" in keyboard.inline_keyboard[0][0].text
+
+
+def test_filter_values_include_counted_seasons_and_episodes() -> None:
+    values = _filter_values_for_hits(
+        [
+            {
+                "year": 2025,
+                "quality": "1080P",
+                "languages": ["Hindi"],
+                "season": 3,
+                "episode": 4,
+            },
+            {
+                "year": 2018,
+                "quality": "360P",
+                "languages": ["English"],
+                "season": 1,
+                "episode": 1,
+            },
+        ]
+    )
+
+    assert values["season"] == [str(number) for number in range(1, 51)]
+    assert values["episode"] == [str(number) for number in range(1, 101)]
+    assert values["year"] == ["2018", "2025"]
+    assert values["quality"] == ["360P", "1080P"]
+    assert values["languages"] == ["English", "Hindi"]
+
+
+def test_filter_options_keyboard_paginates_in_numeric_order() -> None:
+    episodes = [str(number) for number in range(1, 101)]
+    first_page = filter_options_keyboard("episode", episodes)
+    first_choices = [
+        button
+        for row in first_page.inline_keyboard
+        for button in row
+        if button.callback_data.startswith("choose:episode:")
+    ]
+    assert [button.text for button in first_choices] == [str(n) for n in range(1, 21)]
+    assert first_page.inline_keyboard[-2][-1].callback_data == "filterpage:episode:1"
+
+    last_page = filter_options_keyboard("episode", episodes, page=4)
+    last_choices = [
+        button
+        for row in last_page.inline_keyboard
+        for button in row
+        if button.callback_data.startswith("choose:episode:")
+    ]
+    assert [button.text for button in last_choices] == [str(n) for n in range(81, 101)]
+    assert last_page.inline_keyboard[-2][0].callback_data == "filterpage:episode:3"
+    assert last_page.inline_keyboard[-2][-1].text == "5/5"
+
+    season_page = filter_options_keyboard(
+        "season", [str(number) for number in range(1, 51)], page=2
+    )
+    season_choices = [
+        button
+        for row in season_page.inline_keyboard
+        for button in row
+        if button.callback_data.startswith("choose:season:")
+    ]
+    assert [button.text for button in season_choices] == [str(n) for n in range(41, 51)]
+
+
+def test_filter_page_callback_shows_requested_episode_page() -> None:
+    async def run_case():
+        query = SimpleNamespace(
+            data="filterpage:episode:4",
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        db = SimpleNamespace(register_member=AsyncMock())
+        context = SimpleNamespace(
+            user_data={"filter_values": {"episode": [str(n) for n in range(1, 101)]}},
+            application=SimpleNamespace(
+                bot_data={
+                    "services": {"db": db, "indexer": None, "admins": set()}
+                }
+            ),
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(type=ChatType.PRIVATE),
+        )
+
+        await callback_router(update, context)
+        return query
+
+    query = asyncio.run(run_case())
+    query.answer.assert_awaited_once()
+    markup = query.edit_message_text.await_args.kwargs["reply_markup"]
+    choices = [
+        button
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data.startswith("choose:episode:")
+    ]
+    assert [button.text for button in choices] == [str(n) for n in range(81, 101)]
 
 
 def test_admin_home_exposes_sections_without_removed_controls() -> None:
