@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from telegram.constants import ChatMemberStatus
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 
 from bot.admins import AdminRegistry
 from bot.handlers import (
@@ -18,6 +18,7 @@ from bot.handlers import (
     _search_state,
     _send_results,
     _subscription_count_text,
+    _check_subscriptions,
     _welcome_keyboard,
     bot_membership_update,
     channel_post,
@@ -96,7 +97,7 @@ def test_empty_filter_keyboard_keeps_a_back_button() -> None:
     assert "Back" in keyboard.inline_keyboard[0][0].text
 
 
-def test_admin_home_exposes_requested_sections() -> None:
+def test_admin_home_exposes_sections_without_removed_controls() -> None:
     callbacks = [
         button.callback_data
         for row in admin_home({"bot_enabled": True}).inline_keyboard
@@ -105,32 +106,11 @@ def test_admin_home_exposes_requested_sections() -> None:
     ]
     assert {"adm:dashboard", "adm:sources", "adm:live", "adm:subscription",
             "adm:requests:0", "adm:broadcast", "adm:timers", "adm:settings",
-            "adm:groups", "adm:toggle_group_search"} <= set(callbacks)
+            "adm:groups"} <= set(callbacks)
     assert "adm:duplicates" not in callbacks
     assert "adm:cleanup" not in callbacks
-    group_button = next(
-        button
-        for row in admin_home({"group_search_enabled": False}).inline_keyboard
-        for button in row
-        if button.callback_data == "adm:toggle_group_search"
-    )
-    assert group_button.text == "Group search: OFF"
-
-
-def test_only_configured_owners_see_temporary_admin_management() -> None:
-    owner_callbacks = {
-        button.callback_data
-        for row in admin_home({}, can_manage_admins=True).inline_keyboard
-        for button in row
-    }
-    regular_admin_callbacks = {
-        button.callback_data
-        for row in admin_home({}, can_manage_admins=False).inline_keyboard
-        for button in row
-    }
-    assert "adm:admins" in owner_callbacks
-    assert "adm:admins" not in regular_admin_callbacks
-
+    assert "adm:toggle_group_search" not in callbacks
+    assert "adm:admins" not in callbacks
 
 def test_temporary_admin_controls_offer_expiry_and_confirm_removal() -> None:
     keyboard = temporary_admins_keyboard(
@@ -292,6 +272,62 @@ def test_force_sub_menu_exposes_add_remove_and_total_count_actions() -> None:
     assert "adm:remove_sub" in callbacks
     assert "adm:home" in callbacks
     assert any(button.text == "Force-sub: OFF" for button in buttons)
+
+
+def test_subscription_check_names_channel_when_user_is_not_a_member() -> None:
+    async def run_check() -> tuple[bool, str | None]:
+        update = SimpleNamespace(effective_user=SimpleNamespace(id=7))
+        context = SimpleNamespace(
+            bot=SimpleNamespace(
+                get_chat_member=AsyncMock(return_value=SimpleNamespace(status=ChatMemberStatus.LEFT))
+            )
+        )
+        db = SimpleNamespace(
+            get_settings=AsyncMock(return_value={"subscription": {"enabled": True}}),
+            get_subscriptions=AsyncMock(return_value=[{"chat_id": "-100123", "title": "Dahiya Movie Store"}]),
+        )
+        return await _check_subscriptions(update, context, db)
+
+    assert asyncio.run(run_check()) == (False, "Join Dahiya Movie Store first, then tap Try Again.")
+
+
+def test_subscription_check_explains_when_telegram_cannot_verify_channel() -> None:
+    async def run_check() -> tuple[bool, str | None]:
+        update = SimpleNamespace(effective_user=SimpleNamespace(id=7))
+        context = SimpleNamespace(
+            bot=SimpleNamespace(get_chat_member=AsyncMock(side_effect=TelegramError("Forbidden")))
+        )
+        db = SimpleNamespace(
+            get_settings=AsyncMock(return_value={"subscription": {"enabled": True}}),
+            get_subscriptions=AsyncMock(return_value=[{"chat_id": "-100123", "title": "Dahiya movie chat"}]),
+        )
+        return await _check_subscriptions(update, context, db)
+
+    is_subscribed, reason = asyncio.run(run_check())
+    assert not is_subscribed
+    assert reason == "Could not verify Dahiya movie chat. Check the bot's channel access and saved chat ID."
+
+
+def test_subscription_check_accepts_membership_in_all_channels() -> None:
+    async def run_check() -> tuple[bool, str | None]:
+        update = SimpleNamespace(effective_user=SimpleNamespace(id=7))
+        context = SimpleNamespace(
+            bot=SimpleNamespace(
+                get_chat_member=AsyncMock(return_value=SimpleNamespace(status=ChatMemberStatus.MEMBER))
+            )
+        )
+        db = SimpleNamespace(
+            get_settings=AsyncMock(return_value={"subscription": {"enabled": True}}),
+            get_subscriptions=AsyncMock(return_value=[
+                {"chat_id": "-100123", "title": "Store"},
+                {"chat_id": "-100456", "title": "Movie chat"},
+            ]),
+        )
+        result = await _check_subscriptions(update, context, db)
+        assert context.bot.get_chat_member.await_count == 2
+        return result
+
+    assert asyncio.run(run_check()) == (True, None)
 
 
 def test_force_sub_count_reports_number_of_links() -> None:

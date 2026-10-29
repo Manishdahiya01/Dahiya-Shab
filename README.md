@@ -95,8 +95,8 @@ The service listens on `PORT` (default `10000`) and exposes `http://localhost:10
 
 ## Admin panel actions
 
-- `/admin` opens the control panel. IDs in `ADMIN_USER_IDS` are permanent owners; they can grant or remove temporary admins.
-- **Temporary Admins** lets a configured owner grant admin access for 1 hour, 24 hours, or 7 days. Grants expire automatically; temporary admins cannot grant or remove admin access.
+- `/admin` opens the control panel. IDs in `ADMIN_USER_IDS` are permanent bot owners; this is separate from Telegram group-admin status.
+- The Temporary Admins and Group search controls are hidden from the Admin Panel; existing temporary grants and the saved group-search setting are unchanged.
 - **Settings** contains the profile image/description, welcome message/buttons, fuzzy search, auto-delete, new-indexing, subscription, and not-found message/button controls.
 - **Settings** also controls the Powered by line shown on search results.
 - **Index Sources** adds/removes sources, toggles new-file indexing, and starts old-file scans. Removing a source does not delete its existing movie records.
@@ -110,6 +110,6 @@ The service listens on `PORT` (default `10000`) and exposes `http://localhost:10
 ## Important limitations
 
 - Historical scanning requires a valid Telethon session and account access to the channel. The bot token alone cannot read old channel history.
-- New indexing requires the bot to be an administrator in each source channel. To search in another channel, enable Group search and grant the bot permission to post messages there. Channel commands have no visible human sender in Telegram, so force-subscription is checked when a user presses a file button. If Telegram denies access to the original message, the bot returns a button to open the source message instead.
+- New indexing requires the bot to be an administrator in each source channel. To search in another channel, keep the saved Group search setting ON and grant the bot permission to post messages there. Channel commands have no visible human sender in Telegram, so force-subscription is checked when a user presses a file button. If Telegram denies access to the original message, the bot returns a button to open the source message instead.
 - Search filters are parsed from filenames/captions. A language, year, quality, season, or episode filter will only be available when that information appears in the indexed message.
 - A bot cannot guarantee a successful first deployment without valid secrets, MongoDB network access, and Telegram channel permissions. Check Render logs if Telegram or MongoDB rejects the configuration.
