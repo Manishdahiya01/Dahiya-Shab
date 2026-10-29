@@ -113,6 +113,51 @@ def test_admin_home_exposes_sections_without_removed_controls() -> None:
     assert "adm:toggle_group_search" not in callbacks
     assert "adm:admins" not in callbacks
 
+
+def test_admin_home_from_photo_welcome_sends_text_panel_and_removes_old_button() -> None:
+    async def run_case():
+        message = SimpleNamespace(
+            text=None,
+            reply_text=AsyncMock(),
+        )
+        query = SimpleNamespace(
+            message=message,
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+            edit_message_reply_markup=AsyncMock(),
+        )
+        db = SimpleNamespace(
+            register_member=AsyncMock(),
+            get_settings=AsyncMock(return_value={}),
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    "services": {
+                        "db": db,
+                        "indexer": SimpleNamespace(running_chats=set()),
+                        "admins": {7},
+                    }
+                }
+            )
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(type=ChatType.PRIVATE),
+        )
+
+        await _handle_admin_callback(update, context, "adm:home")
+        return query, message
+
+    query, message = asyncio.run(run_case())
+    message.reply_text.assert_awaited_once()
+    assert "ADMIN PANEL" in message.reply_text.await_args.args[0]
+    assert "reply_markup" in message.reply_text.await_args.kwargs
+    query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
+    query.edit_message_text.assert_not_awaited()
+
+
 def test_temporary_admin_controls_offer_expiry_and_confirm_removal() -> None:
     keyboard = temporary_admins_keyboard(
         [{"user_id": 123456, "expires_at": None}],
