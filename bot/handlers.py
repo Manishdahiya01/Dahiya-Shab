@@ -95,10 +95,6 @@ def _is_owner(user_id: int | None, admins: Any) -> bool:
     return user_id in admins
 
 
-def _admin_home(settings: dict[str, Any], user_id: int | None, admins: Any) -> InlineKeyboardMarkup:
-    return admin_home(settings, can_manage_admins=_is_owner(user_id, admins))
-
-
 def _temporary_admins_text(admins: list[dict[str, Any]], total: int, page: int) -> str:
     lines = [f"🛡 TEMPORARY ADMINS · {total} active"]
     for item in admins:
@@ -125,25 +121,40 @@ async def _temporary_admin_page(db: Database, page: int) -> tuple[list[dict[str,
     return rows, total, page
 
 
-async def _is_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database) -> bool:
+async def _check_subscriptions(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database
+) -> tuple[bool, str | None]:
     settings = await db.get_settings()
     if not settings.get("subscription", {}).get("enabled", False):
-        return True
+        return True, None
     channels = await db.get_subscriptions()
     if not channels:
-        return True
+        return True, None
     user_id = update.effective_user.id if update.effective_user else None
     if user_id is None:
-        return False
+        return False, "Could not identify your Telegram account. Reopen the bot and try again."
     for channel in channels:
+        title = str(channel.get("title") or channel.get("chat_id") or "required channel")[:80]
         try:
             member = await context.bot.get_chat_member(channel["chat_id"], user_id)
-            if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
-                return False
         except TelegramError:
             logger.exception("Could not verify subscription for channel %s.", channel.get("chat_id"))
-            return False
-    return True
+            return False, (
+                f"Could not verify {title}. Check the bot's channel access and saved chat ID."
+            )
+        if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+            logger.info(
+                "Subscription check: user is not a member of channel %s (status=%s).",
+                channel.get("chat_id"),
+                member.status,
+            )
+            return False, f"Join {title} first, then tap Try Again."
+    return True, None
+
+
+async def _is_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database) -> bool:
+    is_subscribed, _ = await _check_subscriptions(update, context, db)
+    return is_subscribed
 
 
 async def _show_join_gate(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database) -> None:
@@ -219,7 +230,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     settings = await db.get_settings()
     await update.effective_message.reply_text(
         "Dahiya Movie Store — Admin Panel",
-        reply_markup=_admin_home(settings, user.id if user else None, admins),
+        reply_markup=admin_home(settings),
     )
 
 
@@ -597,7 +608,7 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     if data == "adm:home":
         await query.edit_message_text(
             "👑 DAHIYA MOVIE STORE — ADMIN PANEL",
-            reply_markup=_admin_home(settings, user.id if user else None, admins),
+            reply_markup=admin_home(settings),
         )
     elif data == "adm:admins" or data.startswith("adm:admins:page:"):
         try:
@@ -617,7 +628,7 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         if duration_seconds not in TEMP_ADMIN_DURATIONS:
             await query.edit_message_text(
                 "Invalid temporary-admin duration.",
-                reply_markup=_admin_home(settings, user.id if user else None, admins),
+                reply_markup=admin_home(settings),
             )
             return
         context.user_data["admin_state"] = "temporary_admin_id"
@@ -631,7 +642,7 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         if not match:
             await query.edit_message_text(
                 "That temporary-admin entry is invalid.",
-                reply_markup=_admin_home(settings, user.id if user else None, admins),
+                reply_markup=admin_home(settings),
             )
             return
         user_id, page = (int(value) for value in match.groups())
@@ -644,14 +655,14 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         if not match:
             await query.edit_message_text(
                 "That temporary-admin entry is invalid.",
-                reply_markup=_admin_home(settings, user.id if user else None, admins),
+                reply_markup=admin_home(settings),
             )
             return
         target_id, page = (int(value) for value in match.groups())
         if _is_owner(target_id, admins):
             await query.edit_message_text(
                 "Configured owners cannot be removed here.",
-                reply_markup=_admin_home(settings, user.id if user else None, admins),
+                reply_markup=admin_home(settings),
             )
             return
         removed = await db.remove_temporary_admin(target_id)
@@ -669,14 +680,14 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         updated = await db.get_settings()
         await query.edit_message_text(
             f"Group search is now {'ON' if enabled else 'OFF'}.",
-            reply_markup=_admin_home(updated, user.id if user else None, admins),
+            reply_markup=admin_home(updated),
         )
     elif data == "adm:toggle_bot":
         enabled = not settings.get("bot_enabled", True)
         await db.update_settings({"bot_enabled": enabled})
         await query.edit_message_text(
             "👑 DAHIYA MOVIE STORE — ADMIN PANEL",
-            reply_markup=_admin_home(await db.get_settings(), user.id if user else None, admins),
+            reply_markup=admin_home(await db.get_settings()),
         )
     elif data == "adm:dashboard":
         stats = await db.request_stats()
@@ -1597,8 +1608,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     search_data = _search_state(update, context)
     await db.register_member(user)
     if data == "sub:check":
-        if not await _is_subscribed(update, context, db):
-            await query.answer("Join the required channel(s) first.", show_alert=True)
+        is_subscribed, reason = await _check_subscriptions(update, context, db)
+        if not is_subscribed:
+            await query.answer(reason or "Join the required channel(s) first.", show_alert=True)
             return
         await query.answer("Subscription confirmed.")
         pending_file_key = context.user_data.pop("pending_file_key", None)

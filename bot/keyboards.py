@@ -5,34 +5,21 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-def admin_home(
-    settings: dict[str, Any],
-    can_manage_admins: bool = False,
-) -> InlineKeyboardMarkup:
+def admin_home(settings: dict[str, Any]) -> InlineKeyboardMarkup:
     bot_label = "Bot: ON" if settings.get("bot_enabled", True) else "Bot: OFF"
-    group_search_label = (
-        f"Group search: {'ON' if settings.get('group_search_enabled', True) else 'OFF'}"
-    )
     rows = [
-            [InlineKeyboardButton(f"👑 DAHIYA MOVIE STORE ADMIN · {bot_label}", callback_data="adm:dashboard")],
-            [InlineKeyboardButton("📊 Dashboard", callback_data="adm:dashboard"),
-             InlineKeyboardButton("📁 Index Sources", callback_data="adm:sources")],
-            [InlineKeyboardButton("👥 Live Users & Activity", callback_data="adm:live"),
-             InlineKeyboardButton("📣 Force Subscribe", callback_data="adm:subscription")],
-            [InlineKeyboardButton("🔎 User Search Requests", callback_data="adm:requests:0"),
-             InlineKeyboardButton("📢 Broadcast", callback_data="adm:broadcast")],
-            [InlineKeyboardButton("👨‍👩‍👧 Bot Groups", callback_data="adm:groups"),
-             InlineKeyboardButton(group_search_label, callback_data="adm:toggle_group_search")],
-            [InlineKeyboardButton("⏱ Timers & Countdown", callback_data="adm:timers"),
-             InlineKeyboardButton("⚙️ Settings", callback_data="adm:settings")],
-        ]
-    if can_manage_admins:
-        rows.insert(
-            5,
-            [InlineKeyboardButton("🛡 Temporary Admins", callback_data="adm:admins")],
-        )
+        [InlineKeyboardButton(f"👑 DAHIYA MOVIE STORE ADMIN · {bot_label}", callback_data="adm:dashboard")],
+        [InlineKeyboardButton("📊 Dashboard", callback_data="adm:dashboard"),
+         InlineKeyboardButton("📁 Index Sources", callback_data="adm:sources")],
+        [InlineKeyboardButton("👥 Live Users & Activity", callback_data="adm:live"),
+         InlineKeyboardButton("📣 Force Subscribe", callback_data="adm:subscription")],
+        [InlineKeyboardButton("🔎 User Search Requests", callback_data="adm:requests:0"),
+         InlineKeyboardButton("📢 Broadcast", callback_data="adm:broadcast")],
+        [InlineKeyboardButton("👨‍👩‍👧 Bot Groups", callback_data="adm:groups")],
+        [InlineKeyboardButton("⏱ Timers & Countdown", callback_data="adm:timers"),
+         InlineKeyboardButton("⚙️ Settings", callback_data="adm:settings")],
+    ]
     return InlineKeyboardMarkup(rows)
-
 
 def temporary_admins_keyboard(
     admins: list[dict[str, Any]],
