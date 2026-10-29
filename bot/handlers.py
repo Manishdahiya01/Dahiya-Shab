@@ -59,9 +59,14 @@ def _is_admin(user_id: int | None, admins: Any) -> bool:
 
 def _search_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
     chat = update.effective_chat
-    if chat and chat.type == ChatType.CHANNEL:
-        return context.chat_data
-    return context.user_data
+    if not chat or chat.type == ChatType.PRIVATE:
+        return context.user_data
+    callback = update.callback_query
+    message = callback.message if callback else None
+    if message:
+        states = (getattr(context, "chat_data", {}) or {}).get("_search_results", {})
+        return states.get(str(message.message_id), {})
+    return {}
 
 
 async def _search_command_text(
@@ -322,8 +327,15 @@ async def _schedule_result_auto_delete(
     )
 
 
-async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database, page: int = 0) -> None:
-    search_data = _search_state(update, context)
+async def _send_results(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    db: Database,
+    page: int = 0,
+    search_data: dict[str, Any] | None = None,
+) -> None:
+    if search_data is None:
+        search_data = _search_state(update, context)
     hits: list[dict[str, Any]] = search_data.get("search_hits", [])
     filters = search_data.get("search_filters", {})
     for key, selected in filters.items():
@@ -409,6 +421,12 @@ async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, db: 
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
+    chat = update.effective_chat
+    if chat and chat.type != ChatType.PRIVATE and getattr(result_message, "message_id", None) is not None:
+        states = context.chat_data.setdefault("_search_results", {})
+        states[str(result_message.message_id)] = search_data
+        while len(states) > 100:
+            states.pop(next(iter(states)))
     await _schedule_result_auto_delete(context, db, result_message, settings)
 
 
@@ -453,13 +471,14 @@ async def _run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Da
         if user
         else (getattr(chat, "title", None) or "Channel")
     )
-    search_data = _search_state(update, context)
+    chat = update.effective_chat
+    search_data = context.user_data if not chat or chat.type == ChatType.PRIVATE else {}
     search_data["last_search"] = query
     search_data["search_hits"] = hits
     search_data["search_filters"] = {}
     search_data["search_requested_by"] = requested_by
     search_data["search_elapsed_seconds"] = time.perf_counter() - started
-    await _send_results(update, context, db)
+    await _send_results(update, context, db, search_data=search_data)
 
 
 async def _broadcast(db: Database, context: ContextTypes.DEFAULT_TYPE, text: str, url: str | None) -> tuple[int, int]:
@@ -649,7 +668,7 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         await db.update_settings({"group_search_enabled": enabled})
         updated = await db.get_settings()
         await query.edit_message_text(
-            f"Group replies are now {'ON' if enabled else 'OFF'}.",
+            f"Group search is now {'ON' if enabled else 'OFF'}.",
             reply_markup=_admin_home(updated, user.id if user else None, admins),
         )
     elif data == "adm:toggle_bot":
@@ -1478,14 +1497,14 @@ async def bot_membership_update(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def _bot_is_group_admin(message: Any, context: ContextTypes.DEFAULT_TYPE, db: Database) -> bool:
     group = await db.get_bot_group(message.chat.id)
-    if group and group.get("bot_status"):
-        return group["bot_status"] == ChatMemberStatus.ADMINISTRATOR
+    if group and group.get("bot_status") == ChatMemberStatus.ADMINISTRATOR:
+        return True
 
-    # Older group records do not store the bot's membership status.
+    # Refresh cached non-admin or missing status after a bot is promoted.
     try:
         membership = await context.bot.get_chat_member(message.chat.id, context.bot.id)
     except TelegramError:
-        logger.exception("Could not verify the bot's admin status in group %s.", message.chat.id)
+        logger.exception("Could not verify the bot's admin status in chat %s.", message.chat.id)
         return False
 
     status = membership.status
@@ -1507,15 +1526,15 @@ async def group_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     text = message.text or ""
     command_query = await _search_command_text(text, context)
     query = command_query if command_query is not None else (text if text and not text.startswith("/") else None)
-    if query is not None and user and not user.is_bot:
+    if query is not None and (user is None or not user.is_bot):
         settings = await db.get_settings()
         if not settings.get("group_search_enabled", True):
             return
-        if not settings.get("bot_enabled", True) and not _is_admin(user.id, admins):
+        if not settings.get("bot_enabled", True) and not _is_admin(user.id if user else None, admins):
             return
         if not await _bot_is_group_admin(message, context, db):
             return
-        if not _is_admin(user.id, admins) and not await _is_subscribed(update, context, db):
+        if user and not _is_admin(user.id, admins) and not await _is_subscribed(update, context, db):
             await _show_join_gate(update, context, db)
             return
         if not query.strip():
@@ -1597,7 +1616,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text("Send a movie or series name to search.")
     elif data == "search:results":
         await query.answer()
-        await _send_results(update, context, db)
+        await _send_results(update, context, db, search_data=search_data)
     elif data.startswith("filter:"):
         await query.answer()
         kind = data.split(":", 1)[1]
@@ -1622,7 +1641,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         search_data.setdefault("search_filters", {})[kind] = selected
         await query.answer(f"Filter: {selected}")
-        await _send_results(update, context, db)
+        await _send_results(update, context, db, search_data=search_data)
     elif data == "page:picker":
         await query.answer()
         await query.edit_message_reply_markup(
@@ -1633,7 +1652,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
     elif data.startswith("page:"):
         await query.answer()
-        await _send_results(update, context, db, max(0, int(data.split(":", 1)[1])))
+        await _send_results(update, context, db, max(0, int(data.split(":", 1)[1])), search_data=search_data)
     elif data == "send_all":
         if not _is_admin(user.id if user else None, admins) and not await _is_subscribed(update, context, db):
             await _show_join_gate(update, context, db)

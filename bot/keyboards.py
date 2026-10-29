@@ -10,8 +10,8 @@ def admin_home(
     can_manage_admins: bool = False,
 ) -> InlineKeyboardMarkup:
     bot_label = "Bot: ON" if settings.get("bot_enabled", True) else "Bot: OFF"
-    group_replies_label = (
-        f"Group replies: {'ON' if settings.get('group_search_enabled', True) else 'OFF'}"
+    group_search_label = (
+        f"Group search: {'ON' if settings.get('group_search_enabled', True) else 'OFF'}"
     )
     rows = [
             [InlineKeyboardButton(f"👑 DAHIYA MOVIE STORE ADMIN · {bot_label}", callback_data="adm:dashboard")],
@@ -22,7 +22,7 @@ def admin_home(
             [InlineKeyboardButton("🔎 User Search Requests", callback_data="adm:requests:0"),
              InlineKeyboardButton("📢 Broadcast", callback_data="adm:broadcast")],
             [InlineKeyboardButton("👨‍👩‍👧 Bot Groups", callback_data="adm:groups"),
-             InlineKeyboardButton(group_replies_label, callback_data="adm:toggle_group_search")],
+             InlineKeyboardButton(group_search_label, callback_data="adm:toggle_group_search")],
             [InlineKeyboardButton("⏱ Timers & Countdown", callback_data="adm:timers"),
              InlineKeyboardButton("⚙️ Settings", callback_data="adm:settings")],
         ]

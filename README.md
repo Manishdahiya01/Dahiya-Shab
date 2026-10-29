@@ -18,8 +18,8 @@ The ZIP contains **18 files**:
 
 ## What works
 
-- `/start` and free-text movie/series search work in private chats; groups also support text searches and `/search <title>` or `/find <title>` when Group replies is ON.
-- Channels support `/search <title>` or `/find <title>` when Group replies is ON and the bot is an administrator.
+- `/start` and free-text movie/series search work in private chats; groups also support text searches and `/search <title>` or `/find <title>` when Group search is ON.
+- Channels support `/search <title>` or `/find <title>` when Group search is ON and the bot is an administrator.
 - Blue filenames open the bot's private chat. Inline Get buttons copy a file into the chat where the button was pressed, without a forwarded-source header; Send All copies up to 10 matching files.
 - Results show the requester, measured search time, and admin-editable Powered by text.
 - Admin-only **Admin Panel** button on `/start` (the `/admin` command remains available): dashboard, recent activity/requests, members, index sources, old-file scan, settings, and broadcast.
@@ -110,6 +110,6 @@ The service listens on `PORT` (default `10000`) and exposes `http://localhost:10
 ## Important limitations
 
 - Historical scanning requires a valid Telethon session and account access to the channel. The bot token alone cannot read old channel history.
-- New indexing requires the bot to be an administrator in each source channel. To search in another channel, enable Group replies and grant the bot permission to post messages there. Channel commands have no visible human sender in Telegram, so force-subscription is checked when a user presses a file button. If Telegram denies access to the original message, the bot returns a button to open the source message instead.
+- New indexing requires the bot to be an administrator in each source channel. To search in another channel, enable Group search and grant the bot permission to post messages there. Channel commands have no visible human sender in Telegram, so force-subscription is checked when a user presses a file button. If Telegram denies access to the original message, the bot returns a button to open the source message instead.
 - Search filters are parsed from filenames/captions. A language, year, quality, season, or episode filter will only be available when that information appears in the indexed message.
 - A bot cannot guarantee a successful first deployment without valid secrets, MongoDB network access, and Telegram channel permissions. Check Render logs if Telegram or MongoDB rejects the configuration.
