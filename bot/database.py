@@ -380,18 +380,27 @@ class Database:
         title: str,
         chat_type: str,
         bot_status: str | None = None,
+        added_by_id: int | None = None,
+        added_by_name: str | None = None,
+        added_by_username: str | None = None,
     ) -> None:
+        values: dict[str, Any] = {
+            "chat_id": str(chat_id),
+            "title": title[:160],
+            "type": chat_type,
+            "updated_at": utc_now(),
+        }
+        if bot_status is not None:
+            values["bot_status"] = bot_status
+        if added_by_id is not None:
+            values["added_by_id"] = int(added_by_id)
+        if added_by_name:
+            values["added_by_name"] = added_by_name[:160]
+        if added_by_username:
+            values["added_by_username"] = added_by_username.lstrip("@")[:64]
         await self.bot_groups.update_one(
             {"chat_id": str(chat_id)},
-            {
-                "$set": {
-                    "chat_id": str(chat_id),
-                    "title": title[:160],
-                    "type": chat_type,
-                    "bot_status": bot_status,
-                    "updated_at": utc_now(),
-                }
-            },
+            {"$set": values},
             upsert=True,
         )
 
@@ -400,6 +409,9 @@ class Database:
 
     async def get_bot_groups(self) -> list[dict[str, Any]]:
         return await self.bot_groups.find().sort("title", ASCENDING).to_list(length=500)
+
+    async def count_bot_groups(self) -> int:
+        return await self.bot_groups.count_documents({})
 
     async def remove_bot_group(self, chat_id: int | str) -> bool:
         result = await self.bot_groups.delete_one({"chat_id": str(chat_id)})

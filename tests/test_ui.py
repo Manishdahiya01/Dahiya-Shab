@@ -2,15 +2,21 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from telegram.constants import ChatMemberStatus
 from telegram.error import BadRequest
 
 from bot.handlers import (
+    _deliver_movie,
+    _group_added_by_label,
+    _index_job_status_line,
     _is_message_not_modified_error,
-    _result_header,
     _result_line,
+    _result_header,
     _subscription_count_text,
     _welcome_keyboard,
+    bot_membership_update,
     group_post,
+    start_command,
 )
 from bot.keyboards import (
     admin_home,
@@ -24,17 +30,20 @@ from bot.keyboards import (
 )
 
 
-def test_result_file_name_is_a_blue_telegram_post_link() -> None:
+def test_result_file_name_links_to_bot_file_delivery_not_source_channel() -> None:
     line = _result_line(
         {
             "source_chat_id": "-1001234567890",
             "source_message_id": 42,
+            "file_key": "0123456789abcdef",
             "filename": "Movie & Series 2024.mkv",
             "size": 1_500_000_000,
             "quality": "1080P",
-        }
+        },
+        "DahiyaShabBot",
     )
-    assert '<a href="https://t.me/c/1234567890/42">' in line
+    assert '<a href="https://t.me/DahiyaShabBot?start=file_0123456789abcdef">' in line
+    assert "https://t.me/c/" not in line
     assert "Movie &amp; Series 2024.mkv" in line
     assert "</a>" in line
 
@@ -165,6 +174,29 @@ def test_force_sub_remove_menu_lists_each_link_and_back() -> None:
     assert "adm:subscription" in callbacks
 
 
+def test_index_progress_line_shows_total_processed_and_error_counts() -> None:
+    line = _index_job_status_line(
+        "Movies",
+        {
+            "status": "running",
+            "files_total": 1200,
+            "files_processed": 300,
+            "indexed": 290,
+            "skipped": 7,
+            "errors": 3,
+        },
+    )
+    assert "300/1200 files processed" in line
+    assert "290 indexed, 7 skipped, 3 errors" in line
+
+
+def test_group_list_shows_who_added_the_bot() -> None:
+    assert _group_added_by_label(
+        {"added_by_name": "Manish Dahiya", "added_by_username": "manish"}
+    ) == "Manish Dahiya (@manish)"
+    assert _group_added_by_label({}) == "Not recorded"
+
+
 def test_result_header_shows_requester_timing_and_admin_branding() -> None:
     header = _result_header("KGF", "Varun", 1.07, 11, "Daya Movie Store")
     assert "KGF" in header
@@ -236,3 +268,88 @@ def test_group_search_runs_only_when_enabled_and_bot_is_admin(monkeypatch) -> No
     assert asyncio.run(run_case(True, "administrator")) is True
     assert asyncio.run(run_case(False, "administrator")) is False
     assert asyncio.run(run_case(True, "member")) is False
+
+
+def test_group_membership_records_who_added_the_bot(monkeypatch) -> None:
+    async def run_case() -> AsyncMock:
+        db = SimpleNamespace(
+            get_bot_group=AsyncMock(return_value=None),
+            save_bot_group=AsyncMock(),
+        )
+        actor = SimpleNamespace(id=99, first_name="A", last_name="B", username="admin")
+        change = SimpleNamespace(
+            new_chat_member=SimpleNamespace(status=ChatMemberStatus.ADMINISTRATOR),
+            chat=SimpleNamespace(id=-100123, title="Movies", username=None, type="supergroup"),
+            from_user=actor,
+        )
+        update = SimpleNamespace(my_chat_member=change)
+        context = SimpleNamespace()
+        monkeypatch.setattr("bot.handlers._services", lambda _: (db, None, set()))
+
+        await bot_membership_update(update, context)
+        return db.save_bot_group
+
+    save_group = asyncio.run(run_case())
+    save_group.assert_awaited_once_with(
+        -100123,
+        "Movies",
+        "supergroup",
+        "administrator",
+        99,
+        "A B",
+        "admin",
+    )
+
+
+def test_file_deep_link_starts_direct_delivery(monkeypatch) -> None:
+    async def run_case() -> tuple[AsyncMock, object, object, object]:
+        item = {"file_key": "0123456789abcdef", "source_chat_id": "-1001", "source_message_id": 55}
+        db = SimpleNamespace(
+            register_member=AsyncMock(),
+            get_settings=AsyncMock(return_value={"bot_enabled": True}),
+            get_movie=AsyncMock(return_value=item),
+        )
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=7, first_name="User", last_name=None, username=None),
+            effective_message=SimpleNamespace(reply_text=AsyncMock()),
+        )
+        context = SimpleNamespace(
+            args=["file_0123456789abcdef"],
+            user_data={},
+            bot_data={},
+        )
+        deliver = AsyncMock()
+        monkeypatch.setattr("bot.handlers._services", lambda _: (db, None, {7}))
+        monkeypatch.setattr("bot.handlers._deliver_movie", deliver)
+
+        await start_command(update, context)
+        return deliver, update, context, db
+
+    deliver, update, context, db = asyncio.run(run_case())
+    deliver.assert_awaited_once_with(
+        update,
+        context,
+        db,
+        {"file_key": "0123456789abcdef", "source_chat_id": "-1001", "source_message_id": 55},
+    )
+
+
+def test_file_delivery_forwards_source_message() -> None:
+    async def run_case() -> AsyncMock:
+        forward = AsyncMock(return_value=SimpleNamespace(message_id=123))
+        db = SimpleNamespace(get_settings=AsyncMock(return_value={"auto_delete": {"enabled": False}}))
+        update = SimpleNamespace(
+            effective_chat=SimpleNamespace(id=7),
+            effective_message=SimpleNamespace(reply_text=AsyncMock()),
+        )
+        context = SimpleNamespace(bot=SimpleNamespace(forward_message=forward))
+        await _deliver_movie(
+            update,
+            context,
+            db,
+            {"source_chat_id": "-100123", "source_message_id": 42},
+        )
+        return forward
+
+    forward = asyncio.run(run_case())
+    forward.assert_awaited_once_with(chat_id=7, from_chat_id=-100123, message_id=42)
