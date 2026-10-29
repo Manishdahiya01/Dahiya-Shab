@@ -1,7 +1,64 @@
 import asyncio
+import re
 from types import SimpleNamespace
 
 from bot.database import Database
+
+
+class FakeSearchCursor:
+    def __init__(self, records):
+        self.records = records
+        self.limit_count = None
+
+    def sort(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, count):
+        self.limit_count = count
+        return self
+
+    async def to_list(self, length=None):
+        count = length if length is not None else self.limit_count
+        return self.records[:count]
+
+
+def _matches_search_filter(record, query):
+    for key, condition in query.items():
+        if key == "$and":
+            if not all(_matches_search_filter(record, part) for part in condition):
+                return False
+        elif key == "$or":
+            if not any(_matches_search_filter(record, part) for part in condition):
+                return False
+        elif isinstance(condition, dict) and "$regex" in condition:
+            flags = re.IGNORECASE if condition.get("$options") == "i" else 0
+            if not re.search(condition["$regex"], str(record.get(key) or ""), flags):
+                return False
+        elif isinstance(condition, dict) and "$in" in condition:
+            actual = record.get(key)
+            actual_values = actual if isinstance(actual, list) else [actual]
+            if not any(value in condition["$in"] for value in actual_values):
+                return False
+        elif isinstance(condition, dict) and "$all" in condition:
+            actual = record.get(key) or []
+            if isinstance(actual, str):
+                actual = [actual]
+            if not set(condition["$all"]) <= set(actual):
+                return False
+        elif record.get(key) != condition:
+            return False
+    return True
+
+
+class FakeSearchCollection:
+    def __init__(self, records):
+        self.records = records
+
+    def find(self, query=None, *_args, **_kwargs):
+        query = query or {}
+        return FakeSearchCursor(
+            [record for record in self.records if _matches_search_filter(record, query)]
+        )
 
 
 class FakeCollection:
@@ -120,3 +177,97 @@ def test_index_data_counts_report_only_movies_and_checkpoints() -> None:
         return await db.index_data_counts()
 
     assert asyncio.run(run_case()) == {"files": 6000, "checkpoints": 1}
+
+
+def test_search_does_not_match_a_single_query_word_from_title_or_caption() -> None:
+    async def run_case():
+        db = Database.__new__(Database)
+        db.movies = FakeSearchCollection(
+            [
+                {
+                    "title": "Pokemon Movie",
+                    "normalized_title": "pokemon movie",
+                    "caption": "Old film collection",
+                },
+                {
+                    "title": "Old Classics",
+                    "normalized_title": "old classics",
+                    "caption": "Pokemon collection",
+                },
+            ]
+        )
+        return await db.search_movies("Pokemon old")
+
+    assert asyncio.run(run_case()) == []
+
+
+def test_search_accepts_symbols_and_small_spelling_errors_without_caption_hits() -> None:
+    async def run_case():
+        db = Database.__new__(Database)
+        matching = {
+            "title": "Pokemon Old",
+            "normalized_title": "pokemon old",
+            "caption": "Collection",
+        }
+        caption_only = {
+            "title": "Old Classics",
+            "normalized_title": "old classics",
+            "caption": "Pokemon",
+        }
+        db.movies = FakeSearchCollection([matching, caption_only])
+        separator_match = await db.search_movies("Poke-mon / Old")
+        typo_match = await db.search_movies("Pokemom Odl")
+        return separator_match, typo_match
+
+    separator_match, typo_match = asyncio.run(run_case())
+    assert [item["title"] for item in separator_match] == ["Pokemon Old"]
+    assert [item["title"] for item in typo_match] == ["Pokemon Old"]
+
+
+def test_fuzzy_setting_only_toggles_tolerant_matching() -> None:
+    async def run_case():
+        db = Database.__new__(Database)
+        db.movies = FakeSearchCollection(
+            [
+                {
+                    "title": "Pokemon Old",
+                    "normalized_title": "pokemon old",
+                    "caption": "",
+                }
+            ]
+        )
+        exact_match = await db.search_movies("Pokemon Old", fuzzy_enabled=False)
+        typo_match = await db.search_movies("Pokemom Odl", fuzzy_enabled=False)
+        return exact_match, typo_match
+
+    exact_match, typo_match = asyncio.run(run_case())
+    assert [item["title"] for item in exact_match] == ["Pokemon Old"]
+    assert typo_match == []
+
+
+def test_search_matches_season_metadata_and_split_title_spelling() -> None:
+    async def run_case():
+        db = Database.__new__(Database)
+        db.movies = FakeSearchCollection(
+            [
+                {
+                    "title": "Crya_yon shincha_an",
+                    "normalized_title": "crya yon shincha an",
+                    "caption": "crya_yon shincha_an S01",
+                    "filename": "",
+                    "season": None,
+                },
+                {
+                    "title": "Shinchan Movie",
+                    "normalized_title": "shinchan movie",
+                    "caption": "Season 2",
+                    "filename": "",
+                    "season": None,
+                },
+            ]
+        )
+        return await db.search_movies("Shinchan season 1")
+
+    assert [item["title"] for item in asyncio.run(run_case())] == [
+        "Crya_yon shincha_an"
+    ]
