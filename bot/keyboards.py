@@ -227,16 +227,54 @@ def results_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
-def filter_options_keyboard(kind: str, values: list[str]) -> InlineKeyboardMarkup:
+FILTER_OPTIONS_PAGE_SIZE = 20
+
+
+def filter_options_keyboard(
+    kind: str, values: list[str], page: int = 0
+) -> InlineKeyboardMarkup:
     rows = []
-    for start in range(0, len(values), 2):
-        pair = values[start : start + 2]
+    total_pages = max(
+        1,
+        (len(values) + FILTER_OPTIONS_PAGE_SIZE - 1) // FILTER_OPTIONS_PAGE_SIZE,
+    )
+    page = max(0, min(page, total_pages - 1))
+    page_start = page * FILTER_OPTIONS_PAGE_SIZE
+    page_values = values[page_start : page_start + FILTER_OPTIONS_PAGE_SIZE]
+    for start in range(0, len(page_values), 2):
+        pair = page_values[start : start + 2]
         rows.append(
             [
-                InlineKeyboardButton(value[:35], callback_data=f"choose:{kind}:{start + idx}")
+                InlineKeyboardButton(
+                    value[:35],
+                    callback_data=f"choose:{kind}:{page_start + start + idx}",
+                )
                 for idx, value in enumerate(pair)
             ]
         )
+    if total_pages > 1:
+        navigation = []
+        if page > 0:
+            navigation.append(
+                InlineKeyboardButton(
+                    "⬅ Previous",
+                    callback_data=f"filterpage:{kind}:{page - 1}",
+                )
+            )
+        navigation.append(
+            InlineKeyboardButton(
+                f"{page + 1}/{total_pages}",
+                callback_data=f"filterpage:{kind}:{page}",
+            )
+        )
+        if page + 1 < total_pages:
+            navigation.append(
+                InlineKeyboardButton(
+                    "Next ➡",
+                    callback_data=f"filterpage:{kind}:{page + 1}",
+                )
+            )
+        rows.append(navigation)
     rows.append([InlineKeyboardButton("⬅ Back to results", callback_data="search:results")])
     return InlineKeyboardMarkup(rows)
 

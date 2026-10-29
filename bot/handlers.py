@@ -341,6 +341,32 @@ async def _schedule_result_auto_delete(
     )
 
 
+def _quality_sort_key(value: str) -> tuple[int, str]:
+    normalized = value.upper()
+    if normalized in {"4K", "UHD"}:
+        return 2160, normalized
+    if normalized == "HD":
+        return 720, normalized
+    match = re.search(r"\d+", normalized)
+    return (int(match.group()) if match else 10_000), normalized
+
+
+def _filter_values_for_hits(hits: list[dict[str, Any]]) -> dict[str, list[str]]:
+    return {
+        "languages": sorted({lang for item in hits for lang in item.get("languages", [])}),
+        "year": sorted(
+            {str(item["year"]) for item in hits if item.get("year") is not None},
+            key=int,
+        ),
+        "quality": sorted(
+            {item["quality"] for item in hits if item.get("quality")},
+            key=_quality_sort_key,
+        ),
+        "episode": [str(number) for number in range(1, 101)],
+        "season": [str(number) for number in range(1, 51)],
+    }
+
+
 async def _send_results(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -373,13 +399,7 @@ async def _send_results(
     search_data["current_page"] = page
     search_data["visible_total"] = len(hits)
     search_data["visible_file_keys"] = [item["file_key"] for item in page_items]
-    filter_values = {
-        "languages": sorted({lang for item in hits for lang in item.get("languages", [])}),
-        "year": sorted({str(item["year"]) for item in hits if item.get("year") is not None}, reverse=True),
-        "quality": sorted({item["quality"] for item in hits if item.get("quality")}),
-        "episode": sorted({str(item["episode"]) for item in hits if item.get("episode") is not None}),
-        "season": sorted({str(item["season"]) for item in hits if item.get("season") is not None}),
-    }
+    filter_values = _filter_values_for_hits(hits)
     search_data["filter_values"] = filter_values
     if not hits:
         settings = await db.get_settings()
@@ -1740,6 +1760,19 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data == "search:results":
         await query.answer()
         await _send_results(update, context, db, search_data=search_data)
+    elif data.startswith("filterpage:"):
+        _, kind, raw_page = data.split(":", 2)
+        try:
+            page = int(raw_page)
+        except ValueError:
+            await query.answer("This filter menu expired.", show_alert=True)
+            return
+        await query.answer()
+        values = search_data.get("filter_values", {}).get(kind, [])
+        await query.edit_message_text(
+            f"Choose {kind}:",
+            reply_markup=filter_options_keyboard(kind, values, page=page),
+        )
     elif data.startswith("filter:"):
         await query.answer()
         kind = data.split(":", 1)[1]
