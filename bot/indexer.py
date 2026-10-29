@@ -45,6 +45,28 @@ def _telethon_document(message: Any) -> dict[str, Any] | None:
     }
 
 
+def _telethon_movie_document(
+    message: Any,
+    chat_id: int | str,
+    source: dict[str, Any],
+) -> dict[str, Any] | None:
+    file_data = _telethon_document(message)
+    if not file_data:
+        return None
+    caption = message.message or ""
+    metadata = parse_metadata(caption, file_data["filename"])
+    return {
+        **metadata,
+        **file_data,
+        "source_chat_id": str(chat_id),
+        "source_message_id": int(message.id),
+        "source_title": source.get("title", ""),
+        "source_username": source.get("username"),
+        "media_type": "video" if file_data["mime_type"].lower().startswith("video/") else "document",
+        "bot_file_id": None,
+    }
+
+
 class HistoricalIndexer:
     def __init__(self, config: Config, db: Database, bot: Any):
         self.config = config
@@ -54,6 +76,7 @@ class HistoricalIndexer:
         self.error: str | None = None
         self.running_chats: set[str] = set()
         self.pause_requested_chats: set[str] = set()
+        self.batch_size = 500
 
     def request_pause(self, chat_id: int | str) -> bool:
         normalized_chat_id = str(chat_id)
@@ -105,21 +128,9 @@ class HistoricalIndexer:
             self.client = None
 
     async def index_telethon_message(self, message: Any, chat_id: int | str, source: dict[str, Any]) -> bool:
-        file_data = _telethon_document(message)
-        if not file_data:
+        doc = _telethon_movie_document(message, chat_id, source)
+        if not doc:
             return False
-        caption = message.message or ""
-        metadata = parse_metadata(caption, file_data["filename"])
-        doc = {
-            **metadata,
-            **file_data,
-            "source_chat_id": str(chat_id),
-            "source_message_id": int(message.id),
-            "source_title": source.get("title", ""),
-            "source_username": source.get("username"),
-            "media_type": "video" if file_data["mime_type"].lower().startswith("video/") else "document",
-            "bot_file_id": None,
-        }
         return bool(await self.db.save_movie(doc))
 
     async def scan_chat(
@@ -273,6 +284,41 @@ class HistoricalIndexer:
                         logger.debug("Could not publish paused indexing status.", exc_info=True)
                 return True
 
+            async def flush_batch(
+                batch: list[tuple[int, dict[str, Any] | None]],
+                filter_name: str,
+            ) -> None:
+                nonlocal last_update
+                if not batch:
+                    return
+                documents = [document for _, document in batch if document is not None]
+                indexed = await self.db.save_movies_bulk(documents)
+                processed = len(batch)
+                job["files_processed"] += processed
+                job["indexed"] += indexed
+                job["skipped"] += processed - indexed
+                last_message_id = batch[-1][0]
+                job["last_message_id"] = last_message_id
+                job["filter_cursors"][filter_name] = last_message_id
+                job["updated_at"] = utc_now()
+                await self.db.set_index_job(job_id, job)
+                batch.clear()
+
+                if (
+                    job["files_processed"] % 1000 == 0
+                    or time.monotonic() - last_update >= 5
+                ):
+                    if progress_message_id:
+                        try:
+                            await self.bot.edit_message_text(
+                                chat_id=admin_chat_id,
+                                message_id=progress_message_id,
+                                text=_index_progress_text(source.get("title", normalized_chat_id), job),
+                            )
+                        except Exception:
+                            logger.debug("Could not update historical-index progress message.", exc_info=True)
+                    last_update = time.monotonic()
+
             last_update = time.monotonic()
             for filter_name, media_filter in media_filters:
                 if await pause_if_requested():
@@ -284,6 +330,7 @@ class HistoricalIndexer:
                 if await pause_if_requested():
                     return
                 cursor = int(job["filter_cursors"].get(filter_name, 0) or 0)
+                batch: list[tuple[int, dict[str, Any] | None]] = []
                 async for message in self.client.iter_messages(
                     entity,
                     reverse=True,
@@ -291,37 +338,21 @@ class HistoricalIndexer:
                     min_id=cursor,
                 ):
                     message_id = int(message.id)
-                    indexed = await self.index_telethon_message(
-                        message,
-                        normalized_chat_id,
-                        source,
+                    batch.append(
+                        (
+                            message_id,
+                            _telethon_movie_document(message, normalized_chat_id, source),
+                        )
                     )
-                    job["files_processed"] += 1
-                    job["last_message_id"] = message_id
-                    job["filter_cursors"][filter_name] = message_id
-                    if indexed:
-                        job["indexed"] += 1
-                    else:
-                        job["skipped"] += 1
-                    job["updated_at"] = utc_now()
-                    # Persist after every item. A deploy can then resume from
-                    # the last completed message instead of rescanning history.
-                    await self.db.set_index_job(job_id, job)
-
-                    if job["files_processed"] % 25 == 0 or time.monotonic() - last_update >= 5:
-                        if progress_message_id:
-                            try:
-                                await self.bot.edit_message_text(
-                                    chat_id=admin_chat_id,
-                                    message_id=progress_message_id,
-                                    text=_index_progress_text(source.get("title", normalized_chat_id), job),
-                                )
-                            except Exception:
-                                logger.debug("Could not update historical-index progress message.", exc_info=True)
-                        last_update = time.monotonic()
+                    if (
+                        len(batch) >= self.batch_size
+                        or normalized_chat_id in self.pause_requested_chats
+                    ):
+                        await flush_batch(batch, filter_name)
                     if await pause_if_requested():
                         return
 
+                await flush_batch(batch, filter_name)
                 if await pause_if_requested():
                     return
                 if filter_name not in job["completed_filters"]:

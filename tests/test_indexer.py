@@ -82,7 +82,7 @@ def test_historical_scan_indexes_documents_and_videos() -> None:
             sources=SimpleNamespace(find_one=AsyncMock(return_value={"title": "Movies"})),
             get_latest_index_job=AsyncMock(return_value=None),
             set_index_job=AsyncMock(),
-            save_movie=AsyncMock(return_value=True),
+            save_movies_bulk=AsyncMock(side_effect=lambda docs: len(docs)),
         )
         bot = SimpleNamespace(
             send_message=AsyncMock(return_value=SimpleNamespace(message_id=77)),
@@ -93,9 +93,9 @@ def test_historical_scan_indexes_documents_and_videos() -> None:
         indexer.client = FakeClient()
 
         await indexer.scan_chat(-100123, 7)
-        return db.set_index_job, db.save_movie, bot.edit_message_text
+        return db.set_index_job, db.save_movies_bulk, bot.edit_message_text
 
-    set_job, save_movie, edit_progress = asyncio.run(run_scan())
+    set_job, save_movies_bulk, edit_progress = asyncio.run(run_scan())
     final_job = set_job.await_args_list[-1].args[1]
     assert final_job["status"] == "completed"
     assert final_job["files_total"] == 3
@@ -103,13 +103,89 @@ def test_historical_scan_indexes_documents_and_videos() -> None:
     assert final_job["indexed"] == 2
     assert final_job["skipped"] == 1
     assert final_job["errors"] == 0
-    assert [call.args[0]["media_type"] for call in save_movie.await_args_list] == [
+    indexed_documents = [
+        document
+        for call in save_movies_bulk.await_args_list
+        for document in call.args[0]
+    ]
+    assert [document["media_type"] for document in indexed_documents] == [
         "document",
         "video",
     ]
     assert "Files processed: 3/3" in edit_progress.await_args.kwargs["text"]
     assert "Indexed/updated: 2" in edit_progress.await_args.kwargs["text"]
     assert final_job["completed_filters"] == ["documents", "videos"]
+
+
+def test_historical_scan_writes_documents_in_500_item_batches() -> None:
+    async def run_scan() -> tuple[list[int], dict[str, Any]]:
+        messages = [
+            SimpleNamespace(
+                id=message_id,
+                media=object(),
+                file=SimpleNamespace(
+                    name=f"Movie-{message_id}.mkv",
+                    mime_type="video/mp4",
+                    size=1024,
+                ),
+                message=f"Movie {message_id}",
+            )
+            for message_id in range(1, 502)
+        ]
+
+        class FakeClient:
+            def is_connected(self) -> bool:
+                return True
+
+            async def get_entity(self, chat_id: int) -> str:
+                return "entity"
+
+            async def get_messages(self, entity: str, *, limit: int, filter: object) -> object:
+                total = len(messages) if isinstance(filter, InputMessagesFilterDocument) else 0
+                return SimpleNamespace(total=total)
+
+            async def iter_messages(
+                self,
+                entity: str,
+                *,
+                reverse: bool,
+                filter: object,
+                min_id: int = 0,
+            ):
+                if isinstance(filter, InputMessagesFilterDocument):
+                    for message in messages:
+                        if message.id > min_id:
+                            yield message
+
+        batch_sizes: list[int] = []
+        db = SimpleNamespace(
+            sources=SimpleNamespace(find_one=AsyncMock(return_value={"title": "Movies"})),
+            get_latest_index_job=AsyncMock(return_value=None),
+            set_index_job=AsyncMock(),
+            save_movies_bulk=AsyncMock(
+                side_effect=lambda docs: batch_sizes.append(len(docs)) or len(docs)
+            ),
+        )
+        bot = SimpleNamespace(
+            send_message=AsyncMock(return_value=SimpleNamespace(message_id=77)),
+            edit_message_text=AsyncMock(),
+        )
+        indexer = HistoricalIndexer(
+            SimpleNamespace(historical_indexing_enabled=True),
+            db,
+            bot,
+        )
+        indexer.client = FakeClient()
+
+        await indexer.scan_chat(-100123, 7)
+        return batch_sizes, db.set_index_job.await_args_list[-1].args[1]
+
+    batch_sizes, final_job = asyncio.run(run_scan())
+    assert batch_sizes == [500, 1]
+    assert final_job["status"] == "completed"
+    assert final_job["files_processed"] == 501
+    assert final_job["indexed"] == 501
+    assert final_job["filter_cursors"]["documents"] == 501
 
 
 def test_resume_migrates_legacy_checkpoint_and_continues_after_last_document() -> None:
@@ -166,7 +242,7 @@ def test_resume_migrates_legacy_checkpoint_and_continues_after_last_document() -
             sources=SimpleNamespace(find_one=AsyncMock(return_value={"title": "Movies"})),
             get_latest_index_job=AsyncMock(return_value=old_job),
             set_index_job=AsyncMock(),
-            save_movie=AsyncMock(return_value=True),
+            save_movies_bulk=AsyncMock(side_effect=lambda docs: len(docs)),
         )
         bot = SimpleNamespace(
             send_message=AsyncMock(return_value=SimpleNamespace(message_id=77)),
@@ -240,7 +316,7 @@ def test_resume_legacy_video_phase_does_not_restart_documents() -> None:
             sources=SimpleNamespace(find_one=AsyncMock(return_value={"title": "Movies"})),
             get_latest_index_job=AsyncMock(return_value=old_job),
             set_index_job=AsyncMock(),
-            save_movie=AsyncMock(return_value=True),
+            save_movies_bulk=AsyncMock(side_effect=lambda docs: len(docs)),
         )
         bot = SimpleNamespace(
             send_message=AsyncMock(return_value=SimpleNamespace(message_id=77)),
@@ -295,7 +371,7 @@ def test_scan_skips_existing_file_records() -> None:
             sources=SimpleNamespace(find_one=AsyncMock(return_value={"title": "Movies"})),
             get_latest_index_job=AsyncMock(return_value=None),
             set_index_job=AsyncMock(),
-            save_movie=AsyncMock(return_value=False),
+            save_movies_bulk=AsyncMock(return_value=0),
         )
         bot = SimpleNamespace(
             send_message=AsyncMock(return_value=SimpleNamespace(message_id=77)),
@@ -367,7 +443,7 @@ def test_pause_saves_checkpoint_and_resume_continues_after_it() -> None:
             get_latest_index_job=AsyncMock(
                 side_effect=lambda chat_id: copy.deepcopy(state["job"])
             ),
-            save_movie=AsyncMock(return_value=True),
+            save_movies_bulk=AsyncMock(side_effect=lambda docs: len(docs)),
         )
         bot = SimpleNamespace(
             send_message=AsyncMock(return_value=SimpleNamespace(message_id=77)),
@@ -378,6 +454,7 @@ def test_pause_saves_checkpoint_and_resume_continues_after_it() -> None:
             db,
             bot,
         )
+        indexer.batch_size = 1
         indexer.client = FakeClient()
         should_pause = True
 
