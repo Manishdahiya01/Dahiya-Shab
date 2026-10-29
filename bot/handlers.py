@@ -367,6 +367,22 @@ def _filter_values_for_hits(hits: list[dict[str, Any]]) -> dict[str, list[str]]:
     }
 
 
+def _hydrate_missing_filter_metadata(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fields = ("year", "quality", "languages", "season", "episode")
+    enriched_hits = []
+    for item in hits:
+        parsed = parse_metadata(
+            str(item.get("caption") or ""),
+            str(item.get("filename") or item.get("title") or ""),
+        )
+        enriched = dict(item)
+        for field in fields:
+            if not enriched.get(field) and parsed.get(field):
+                enriched[field] = parsed[field]
+        enriched_hits.append(enriched)
+    return enriched_hits
+
+
 async def _send_results(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -377,7 +393,8 @@ async def _send_results(
 ) -> None:
     if search_data is None:
         search_data = _search_state(update, context)
-    hits: list[dict[str, Any]] = search_data.get("search_hits", [])
+    hits = _hydrate_missing_filter_metadata(search_data.get("search_hits", []))
+    search_data["search_hits"] = hits
     filters = search_data.get("search_filters", {})
     for key, selected in filters.items():
         if key == "languages":
