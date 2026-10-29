@@ -203,8 +203,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"Welcome to Dahiya Movie Store.\n\n{description}\n\n"
         f"{welcome_message}"
     )
-    markup = _welcome_keyboard(settings, _is_admin(user.id if user else None, admins))
     photo_id = settings.get("welcome_photo_file_id")
+    is_admin = _is_admin(user.id if user else None, admins)
+    markup = _welcome_keyboard(settings, is_admin and not photo_id)
     if photo_id:
         try:
             if len(text) <= 1024:
@@ -636,18 +637,10 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     settings = await db.get_settings()
 
     if data == "adm:home":
-        panel_text = "👑 DAHIYA MOVIE STORE — ADMIN PANEL"
-        if query.message and getattr(query.message, "text", None) is None:
-            await query.message.reply_text(
-                panel_text,
-                reply_markup=admin_home(settings),
-            )
-            await query.edit_message_reply_markup(reply_markup=None)
-        else:
-            await query.edit_message_text(
-                panel_text,
-                reply_markup=admin_home(settings),
-            )
+        await query.edit_message_text(
+            "👑 DAHIYA MOVIE STORE — ADMIN PANEL",
+            reply_markup=admin_home(settings),
+        )
     elif data == "adm:admins" or data.startswith("adm:admins:page:"):
         try:
             page = int(data.rsplit(":", 1)[1]) if data != "adm:admins" else 0

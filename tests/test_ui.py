@@ -114,23 +114,28 @@ def test_admin_home_exposes_sections_without_removed_controls() -> None:
     assert "adm:admins" not in callbacks
 
 
-def test_admin_home_from_photo_welcome_sends_text_panel_and_removes_old_button() -> None:
+def test_photo_welcome_hides_admin_panel_but_keeps_url_buttons() -> None:
     async def run_case():
         message = SimpleNamespace(
-            text=None,
+            reply_photo=AsyncMock(),
             reply_text=AsyncMock(),
         )
-        query = SimpleNamespace(
-            message=message,
-            answer=AsyncMock(),
-            edit_message_text=AsyncMock(),
-            edit_message_reply_markup=AsyncMock(),
-        )
+        settings = {
+            "bot_enabled": True,
+            "welcome_photo_file_id": "welcome-photo",
+            "welcome_message": "Search files",
+            "welcome_button": {"label": "Contact Admin", "url": "https://t.me/admin"},
+            "custom_reply_buttons": [
+                {"label": "Get Updates", "url": "https://t.me/updates"}
+            ],
+        }
         db = SimpleNamespace(
             register_member=AsyncMock(),
-            get_settings=AsyncMock(return_value={}),
+            get_settings=AsyncMock(return_value=settings),
         )
         context = SimpleNamespace(
+            args=[],
+            user_data={},
             application=SimpleNamespace(
                 bot_data={
                     "services": {
@@ -142,20 +147,19 @@ def test_admin_home_from_photo_welcome_sends_text_panel_and_removes_old_button()
             )
         )
         update = SimpleNamespace(
-            callback_query=query,
             effective_user=SimpleNamespace(id=7),
-            effective_chat=SimpleNamespace(type=ChatType.PRIVATE),
+            effective_message=message,
         )
 
-        await _handle_admin_callback(update, context, "adm:home")
-        return query, message
+        await start_command(update, context)
+        return message
 
-    query, message = asyncio.run(run_case())
-    message.reply_text.assert_awaited_once()
-    assert "ADMIN PANEL" in message.reply_text.await_args.args[0]
-    assert "reply_markup" in message.reply_text.await_args.kwargs
-    query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
-    query.edit_message_text.assert_not_awaited()
+    message = asyncio.run(run_case())
+    message.reply_photo.assert_awaited_once()
+    markup = message.reply_photo.await_args.kwargs["reply_markup"]
+    buttons = [button for row in markup.inline_keyboard for button in row]
+    assert {button.text for button in buttons} == {"Contact Admin", "Get Updates"}
+    assert not any(button.callback_data == "adm:home" for button in buttons)
 
 
 def test_temporary_admin_controls_offer_expiry_and_confirm_removal() -> None:
