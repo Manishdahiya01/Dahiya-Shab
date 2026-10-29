@@ -203,8 +203,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"Welcome to Dahiya Movie Store.\n\n{description}\n\n"
         f"{welcome_message}"
     )
-    markup = _welcome_keyboard(settings, _is_admin(user.id if user else None, admins))
     photo_id = settings.get("welcome_photo_file_id")
+    is_admin = _is_admin(user.id if user else None, admins)
+    markup = _welcome_keyboard(settings, is_admin and not photo_id)
     if photo_id:
         try:
             if len(text) <= 1024:
