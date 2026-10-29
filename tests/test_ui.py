@@ -15,6 +15,8 @@ from bot.handlers import (
     _is_message_not_modified_error,
     _result_line,
     _result_header,
+    _search_state,
+    _send_results,
     _subscription_count_text,
     _welcome_keyboard,
     bot_membership_update,
@@ -112,7 +114,7 @@ def test_admin_home_exposes_requested_sections() -> None:
         for button in row
         if button.callback_data == "adm:toggle_group_search"
     )
-    assert group_button.text == "Group replies: OFF"
+    assert group_button.text == "Group search: OFF"
 
 
 def test_only_configured_owners_see_temporary_admin_management() -> None:
@@ -390,7 +392,7 @@ def test_group_search_runs_only_when_enabled_and_bot_is_admin(monkeypatch) -> No
             ),
         )
         update = SimpleNamespace(effective_message=message, effective_user=user)
-        context = SimpleNamespace(user_data={}, bot=SimpleNamespace(id=99))
+        context = SimpleNamespace(user_data={}, bot=SimpleNamespace(id=99, get_chat_member=AsyncMock(return_value=SimpleNamespace(status=bot_status))))
         db = SimpleNamespace(
             get_settings=AsyncMock(
                 return_value={
@@ -399,6 +401,7 @@ def test_group_search_runs_only_when_enabled_and_bot_is_admin(monkeypatch) -> No
                 }
             ),
             get_bot_group=AsyncMock(return_value={"bot_status": bot_status}),
+            save_bot_group=AsyncMock(),
         )
         run_search = AsyncMock()
         monkeypatch.setattr("bot.handlers._services", lambda _: (db, None, {7}))
@@ -515,13 +518,14 @@ def test_channel_search_requires_enabled_toggle_and_bot_admin(monkeypatch) -> No
         context = SimpleNamespace(
             chat_data={},
             user_data={},
-            bot=SimpleNamespace(id=99),
+            bot=SimpleNamespace(id=99, get_chat_member=AsyncMock(return_value=SimpleNamespace(status=bot_status))),
         )
         db = SimpleNamespace(
             get_settings=AsyncMock(
                 return_value={"group_search_enabled": enabled, "bot_enabled": True}
             ),
             get_bot_group=AsyncMock(return_value={"bot_status": bot_status}),
+            save_bot_group=AsyncMock(),
         )
         run_search = AsyncMock()
         monkeypatch.setattr("bot.handlers._services", lambda _: (db, None, set()))
@@ -557,8 +561,9 @@ def test_channel_search_uses_chat_state_without_a_user(monkeypatch) -> None:
         return chat_data, user_data, db.record_request, send_results
 
     chat_data, user_data, record_request, send_results = asyncio.run(run_case())
-    assert chat_data["last_search"] == "KGF"
-    assert chat_data["search_requested_by"] == "Movies"
+    search_data = send_results.await_args.kwargs["search_data"]
+    assert search_data["last_search"] == "KGF"
+    assert search_data["search_requested_by"] == "Movies"
     assert user_data == {}
     record_request.assert_not_awaited()
     send_results.assert_awaited_once()
@@ -587,3 +592,105 @@ def test_group_search_command_routes_query(monkeypatch) -> None:
     run = asyncio.run(run_case())
     run.assert_awaited_once()
     assert run.await_args.args[3] == "KGF"
+
+
+
+def test_group_search_refreshes_stale_membership_after_promotion(monkeypatch) -> None:
+    async def run_case() -> tuple[AsyncMock, AsyncMock]:
+        user = SimpleNamespace(id=7, is_bot=False)
+        chat = SimpleNamespace(id=-100123, title="Movies", username=None, type="supergroup")
+        message = SimpleNamespace(text="KGF", chat=chat)
+        update = SimpleNamespace(effective_message=message, effective_user=user)
+        get_member = AsyncMock(return_value=SimpleNamespace(status=ChatMemberStatus.ADMINISTRATOR))
+        context = SimpleNamespace(user_data={}, bot=SimpleNamespace(id=99, get_chat_member=get_member))
+        db = SimpleNamespace(
+            get_settings=AsyncMock(return_value={"group_search_enabled": True, "bot_enabled": True}),
+            get_bot_group=AsyncMock(return_value={"bot_status": ChatMemberStatus.MEMBER}),
+            save_bot_group=AsyncMock(),
+        )
+        run_search = AsyncMock()
+        monkeypatch.setattr("bot.handlers._services", lambda _: (db, None, {7}))
+        monkeypatch.setattr("bot.handlers._run_search", run_search)
+
+        await group_post(update, context)
+        return get_member, run_search
+
+    get_member, run_search = asyncio.run(run_case())
+    get_member.assert_awaited_once_with(-100123, 99)
+    run_search.assert_awaited_once()
+    assert run_search.await_args.args[3] == "KGF"
+
+
+def test_group_anonymous_text_can_reach_search(monkeypatch) -> None:
+    async def run_case() -> tuple[AsyncMock, object]:
+        chat = SimpleNamespace(id=-100123, title="Movies", type="supergroup")
+        message = SimpleNamespace(text="KGF", chat=chat)
+        update = SimpleNamespace(effective_message=message, effective_chat=chat, effective_user=None)
+        context = SimpleNamespace(user_data={}, chat_data={}, bot=SimpleNamespace(id=99))
+        db = SimpleNamespace(
+            get_settings=AsyncMock(return_value={"group_search_enabled": True, "bot_enabled": True}),
+            get_bot_group=AsyncMock(return_value={"bot_status": ChatMemberStatus.ADMINISTRATOR}),
+        )
+        run_search = AsyncMock()
+        monkeypatch.setattr("bot.handlers._services", lambda _: (db, None, set()))
+        monkeypatch.setattr("bot.handlers._run_search", run_search)
+
+        await group_post(update, context)
+        return run_search, update
+
+    run_search, update = asyncio.run(run_case())
+    run_search.assert_awaited_once()
+    assert run_search.await_args.args[0] is update
+    assert run_search.await_args.args[3] == "KGF"
+
+
+def test_group_search_state_is_selected_by_result_message() -> None:
+    first = {"last_search": "first"}
+    second = {"last_search": "second"}
+    context = SimpleNamespace(
+        chat_data={"_search_results": {"41": first, "42": second}},
+        user_data={},
+    )
+    update = SimpleNamespace(
+        effective_chat=SimpleNamespace(type="supergroup"),
+        callback_query=SimpleNamespace(message=SimpleNamespace(message_id=42)),
+    )
+
+    assert _search_state(update, context) is second
+
+
+
+def test_group_results_store_state_for_inline_buttons(monkeypatch) -> None:
+    async def run_case() -> tuple[dict, dict]:
+        chat = SimpleNamespace(id=-100123, type="supergroup")
+        message = SimpleNamespace(
+            reply_text=AsyncMock(return_value=SimpleNamespace(message_id=42, chat_id=chat.id))
+        )
+        update = SimpleNamespace(effective_chat=chat, effective_message=message, callback_query=None)
+        state = {
+            "last_search": "KGF",
+            "search_hits": [{
+                "file_key": "0123456789abcdef",
+                "source_chat_id": "-100123",
+                "source_message_id": 55,
+                "filename": "KGF.mkv",
+            }],
+            "search_filters": {},
+            "search_requested_by": "Movies",
+            "search_elapsed_seconds": 0.01,
+        }
+        context = SimpleNamespace(
+            user_data={},
+            chat_data={},
+            bot_data={"bot_username": "DahiyaShabBot"},
+        )
+        db = SimpleNamespace(
+            get_settings=AsyncMock(return_value={"powered_by": "Dahiya Movie Store", "auto_delete": {"enabled": False}})
+        )
+        monkeypatch.setattr("bot.handlers._schedule_result_auto_delete", AsyncMock())
+
+        await _send_results(update, context, db, search_data=state)
+        return context.chat_data, state
+
+    chat_data, state = asyncio.run(run_case())
+    assert chat_data["_search_results"]["42"] is state
