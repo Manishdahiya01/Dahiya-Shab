@@ -7,7 +7,7 @@ from typing import Any
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import InputMessagesFilterDocument
+from telethon.tl.types import InputMessagesFilterDocument, InputMessagesFilterVideo
 
 from .config import Config
 from .database import Database, utc_now
@@ -109,7 +109,7 @@ class HistoricalIndexer:
             "source_message_id": int(message.id),
             "source_title": source.get("title", ""),
             "source_username": source.get("username"),
-            "media_type": "document",
+            "media_type": "video" if file_data["mime_type"].lower().startswith("video/") else "document",
             "bot_file_id": None,
         }
         await self.db.save_movie(doc)
@@ -154,12 +154,21 @@ class HistoricalIndexer:
             if not source:
                 raise RuntimeError("This source is not registered in Index groups.")
             entity = await self.client.get_entity(int(normalized_chat_id))
-            file_count = await self.client.get_messages(
-                entity,
-                limit=0,
-                filter=InputMessagesFilterDocument(),
+            media_filters = (
+                InputMessagesFilterDocument(),
+                InputMessagesFilterVideo(),
             )
-            job["files_total"] = max(0, int(getattr(file_count, "total", 0) or 0))
+            media_totals = []
+            for media_filter in media_filters:
+                media_count = await self.client.get_messages(
+                    entity,
+                    limit=0,
+                    filter=media_filter,
+                )
+                media_totals.append(
+                    max(0, int(getattr(media_count, "total", 0) or 0))
+                )
+            job["files_total"] = sum(media_totals)
             await self.db.set_index_job(job_id, job)
             try:
                 progress_message = await self.bot.send_message(
@@ -171,36 +180,37 @@ class HistoricalIndexer:
                 logger.exception("Could not send historical-index progress message.")
 
             last_update = time.monotonic()
-            async for message in self.client.iter_messages(
-                entity,
-                reverse=True,
-                filter=InputMessagesFilterDocument(),
-            ):
-                job["files_processed"] += 1
-                job["last_message_id"] = int(message.id)
-                try:
-                    if await self.index_telethon_message(message, normalized_chat_id, source):
-                        job["indexed"] += 1
-                    else:
-                        job["skipped"] += 1
-                except Exception as exc:
-                    job["errors"] += 1
-                    job["error"] = str(exc)[:500]
-                    raise
+            for media_filter in media_filters:
+                async for message in self.client.iter_messages(
+                    entity,
+                    reverse=True,
+                    filter=media_filter,
+                ):
+                    job["files_processed"] += 1
+                    job["last_message_id"] = int(message.id)
+                    try:
+                        if await self.index_telethon_message(message, normalized_chat_id, source):
+                            job["indexed"] += 1
+                        else:
+                            job["skipped"] += 1
+                    except Exception as exc:
+                        job["errors"] += 1
+                        job["error"] = str(exc)[:500]
+                        raise
 
-                if job["files_processed"] % 25 == 0 or time.monotonic() - last_update >= 5:
-                    job["updated_at"] = utc_now()
-                    await self.db.set_index_job(job_id, job)
-                    if progress_message_id:
-                        try:
-                            await self.bot.edit_message_text(
-                                chat_id=admin_chat_id,
-                                message_id=progress_message_id,
-                                text=_index_progress_text(source.get("title", normalized_chat_id), job),
-                            )
-                        except Exception:
-                            logger.debug("Could not update historical-index progress message.", exc_info=True)
-                    last_update = time.monotonic()
+                    if job["files_processed"] % 25 == 0 or time.monotonic() - last_update >= 5:
+                        job["updated_at"] = utc_now()
+                        await self.db.set_index_job(job_id, job)
+                        if progress_message_id:
+                            try:
+                                await self.bot.edit_message_text(
+                                    chat_id=admin_chat_id,
+                                    message_id=progress_message_id,
+                                    text=_index_progress_text(source.get("title", normalized_chat_id), job),
+                                )
+                            except Exception:
+                                logger.debug("Could not update historical-index progress message.", exc_info=True)
+                        last_update = time.monotonic()
 
             job.update({"status": "completed", "finished_at": utc_now(), "updated_at": utc_now()})
             await self.db.set_index_job(
