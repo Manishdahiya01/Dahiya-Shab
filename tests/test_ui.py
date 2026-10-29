@@ -18,8 +18,10 @@ from bot.handlers import (
     _subscription_count_text,
     _welcome_keyboard,
     bot_membership_update,
+    channel_post,
     group_post,
     start_command,
+    _run_search,
 )
 from bot.keyboards import (
     admin_home,
@@ -474,22 +476,114 @@ def test_file_deep_link_starts_direct_delivery(monkeypatch) -> None:
     )
 
 
-def test_file_delivery_forwards_source_message() -> None:
+def test_file_delivery_copies_source_without_forward_header() -> None:
     async def run_case() -> AsyncMock:
-        forward = AsyncMock(return_value=SimpleNamespace(message_id=123))
+        copy = AsyncMock(return_value=SimpleNamespace(message_id=123))
         db = SimpleNamespace(get_settings=AsyncMock(return_value={"auto_delete": {"enabled": False}}))
         update = SimpleNamespace(
             effective_chat=SimpleNamespace(id=7),
             effective_message=SimpleNamespace(reply_text=AsyncMock()),
         )
-        context = SimpleNamespace(bot=SimpleNamespace(forward_message=forward))
+        context = SimpleNamespace(bot=SimpleNamespace(copy_message=copy))
         await _deliver_movie(
             update,
             context,
             db,
             {"source_chat_id": "-100123", "source_message_id": 42},
         )
-        return forward
+        return copy
 
-    forward = asyncio.run(run_case())
-    forward.assert_awaited_once_with(chat_id=7, from_chat_id=-100123, message_id=42)
+    copy = asyncio.run(run_case())
+    copy.assert_awaited_once_with(chat_id=7, from_chat_id=-100123, message_id=42)
+
+
+
+def test_channel_search_requires_enabled_toggle_and_bot_admin(monkeypatch) -> None:
+    async def run_case(enabled: bool, bot_status: str) -> AsyncMock:
+        chat = SimpleNamespace(id=-100123, title="Movies", username="movies", type="channel")
+        message = SimpleNamespace(
+            text="/search KGF",
+            chat=chat,
+            reply_text=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            channel_post=message,
+            effective_message=message,
+            effective_chat=chat,
+            effective_user=None,
+        )
+        context = SimpleNamespace(
+            chat_data={},
+            user_data={},
+            bot=SimpleNamespace(id=99),
+        )
+        db = SimpleNamespace(
+            get_settings=AsyncMock(
+                return_value={"group_search_enabled": enabled, "bot_enabled": True}
+            ),
+            get_bot_group=AsyncMock(return_value={"bot_status": bot_status}),
+        )
+        run_search = AsyncMock()
+        monkeypatch.setattr("bot.handlers._services", lambda _: (db, None, set()))
+        monkeypatch.setattr("bot.handlers._run_search", run_search)
+
+        await channel_post(update, context)
+        return run_search
+
+    run = asyncio.run(run_case(True, ChatMemberStatus.ADMINISTRATOR))
+    run.assert_awaited_once()
+    assert run.await_args.args[3] == "KGF"
+    assert asyncio.run(run_case(False, ChatMemberStatus.ADMINISTRATOR)).await_count == 0
+    assert asyncio.run(run_case(True, ChatMemberStatus.MEMBER)).await_count == 0
+
+
+def test_channel_search_uses_chat_state_without_a_user(monkeypatch) -> None:
+    async def run_case() -> tuple[dict, dict, AsyncMock, AsyncMock]:
+        chat = SimpleNamespace(id=-100123, title="Movies", type="channel")
+        update = SimpleNamespace(effective_user=None, effective_chat=chat, effective_message=SimpleNamespace())
+        chat_data: dict = {}
+        user_data: dict = {}
+        context = SimpleNamespace(chat_data=chat_data, user_data=user_data)
+        db = SimpleNamespace(
+            register_member=AsyncMock(),
+            record_request=AsyncMock(),
+            get_settings=AsyncMock(return_value={"fuzzy_search_enabled": True}),
+            search_movies=AsyncMock(return_value=[]),
+        )
+        send_results = AsyncMock()
+        monkeypatch.setattr("bot.handlers._send_results", send_results)
+
+        await _run_search(update, context, db, "KGF")
+        return chat_data, user_data, db.record_request, send_results
+
+    chat_data, user_data, record_request, send_results = asyncio.run(run_case())
+    assert chat_data["last_search"] == "KGF"
+    assert chat_data["search_requested_by"] == "Movies"
+    assert user_data == {}
+    record_request.assert_not_awaited()
+    send_results.assert_awaited_once()
+
+
+def test_group_search_command_routes_query(monkeypatch) -> None:
+    async def run_case() -> AsyncMock:
+        user = SimpleNamespace(id=7, is_bot=False)
+        message = SimpleNamespace(
+            text="/search KGF",
+            chat=SimpleNamespace(id=-100123, title="Movies", username=None, type="supergroup"),
+        )
+        update = SimpleNamespace(effective_message=message, effective_user=user)
+        context = SimpleNamespace(user_data={}, bot=SimpleNamespace(id=99))
+        db = SimpleNamespace(
+            get_settings=AsyncMock(return_value={"group_search_enabled": True, "bot_enabled": True}),
+            get_bot_group=AsyncMock(return_value={"bot_status": ChatMemberStatus.ADMINISTRATOR}),
+        )
+        run_search = AsyncMock()
+        monkeypatch.setattr("bot.handlers._services", lambda _: (db, None, {7}))
+        monkeypatch.setattr("bot.handlers._run_search", run_search)
+
+        await group_post(update, context)
+        return run_search
+
+    run = asyncio.run(run_case())
+    run.assert_awaited_once()
+    assert run.await_args.args[3] == "KGF"
