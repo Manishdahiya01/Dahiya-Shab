@@ -57,6 +57,31 @@ def _is_admin(user_id: int | None, admins: Any) -> bool:
     return user_id is not None and user_id in admins
 
 
+def _search_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
+    chat = update.effective_chat
+    if chat and chat.type == ChatType.CHANNEL:
+        return context.chat_data
+    return context.user_data
+
+
+async def _search_command_text(
+    text: str | None, context: ContextTypes.DEFAULT_TYPE
+) -> str | None:
+    if not text:
+        return None
+    match = re.fullmatch(
+        r"\s*/(?:search|find)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?\s*",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    target_username, query = match.groups()
+    if target_username and target_username.casefold() != (await _bot_username(context)).casefold():
+        return None
+    return (query or "").strip()
+
+
 def _is_owner(user_id: int | None, admins: Any) -> bool:
     if user_id is None:
         return False
@@ -298,8 +323,9 @@ async def _schedule_result_auto_delete(
 
 
 async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database, page: int = 0) -> None:
-    hits: list[dict[str, Any]] = context.user_data.get("search_hits", [])
-    filters = context.user_data.get("search_filters", {})
+    search_data = _search_state(update, context)
+    hits: list[dict[str, Any]] = search_data.get("search_hits", [])
+    filters = search_data.get("search_filters", {})
     for key, selected in filters.items():
         if key == "languages":
             hits = [item for item in hits if selected in (item.get("languages") or [])]
@@ -317,9 +343,9 @@ async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, db: 
         page = min(page, (len(hits) - 1) // PAGE_SIZE)
     start = page * PAGE_SIZE
     page_items = hits[start : start + PAGE_SIZE]
-    context.user_data["current_page"] = page
-    context.user_data["visible_total"] = len(hits)
-    context.user_data["visible_file_keys"] = [item["file_key"] for item in page_items]
+    search_data["current_page"] = page
+    search_data["visible_total"] = len(hits)
+    search_data["visible_file_keys"] = [item["file_key"] for item in page_items]
     filter_values = {
         "languages": sorted({lang for item in hits for lang in item.get("languages", [])}),
         "year": sorted({str(item["year"]) for item in hits if item.get("year") is not None}, reverse=True),
@@ -327,7 +353,7 @@ async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, db: 
         "episode": sorted({str(item["episode"]) for item in hits if item.get("episode") is not None}),
         "season": sorted({str(item["season"]) for item in hits if item.get("season") is not None}),
     }
-    context.user_data["filter_values"] = filter_values
+    search_data["filter_values"] = filter_values
     if not hits:
         settings = await db.get_settings()
         message = settings.get("not_found_message") or "Sorry, this movie was not found."
@@ -342,12 +368,12 @@ async def _send_results(update: Update, context: ContextTypes.DEFAULT_TYPE, db: 
         await _schedule_result_auto_delete(context, db, result_message, settings)
         return
 
-    query = context.user_data.get("last_search", "")
+    query = search_data.get("last_search", "")
     settings = await db.get_settings()
     header = _result_header(
         str(query),
-        str(context.user_data.get("search_requested_by") or "Unknown"),
-        float(context.user_data.get("search_elapsed_seconds") or 0),
+        str(search_data.get("search_requested_by") or "Unknown"),
+        float(search_data.get("search_elapsed_seconds") or 0),
         len(hits),
         str(settings.get("powered_by") or "Dahiya Movie Store | Search Zone"),
     )
@@ -410,26 +436,29 @@ async def _run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Da
         await update.effective_message.reply_text("Send a movie or series name to search.")
         return
     started = time.perf_counter()
-    await db.register_member(update.effective_user)
-    await db.record_request(update.effective_user, query)
+    user = update.effective_user
+    if user:
+        await db.register_member(user)
+        await db.record_request(user, query)
     settings = await db.get_settings()
     hits = await db.search_movies(
         query,
         fuzzy_enabled=settings.get("fuzzy_search_enabled", True),
     )
-    user = update.effective_user
+    chat = update.effective_chat
     requested_by = (
         " ".join(filter(None, [user.first_name, user.last_name]))
         or user.username
         or str(user.id)
         if user
-        else "Unknown"
+        else (getattr(chat, "title", None) or "Channel")
     )
-    context.user_data["last_search"] = query
-    context.user_data["search_hits"] = hits
-    context.user_data["search_filters"] = {}
-    context.user_data["search_requested_by"] = requested_by
-    context.user_data["search_elapsed_seconds"] = time.perf_counter() - started
+    search_data = _search_state(update, context)
+    search_data["last_search"] = query
+    search_data["search_hits"] = hits
+    search_data["search_filters"] = {}
+    search_data["search_requested_by"] = requested_by
+    search_data["search_elapsed_seconds"] = time.perf_counter() - started
     await _send_results(update, context, db)
 
 
@@ -1399,7 +1428,23 @@ async def private_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db, _, _ = _services(context)
     message = update.channel_post
-    await _save_new_source_message(message, db)
+    if not message:
+        return
+
+    query = await _search_command_text(message.text, context)
+    if query is None:
+        await _save_new_source_message(message, db)
+        return
+
+    settings = await db.get_settings()
+    if not settings.get("group_search_enabled", True) or not settings.get("bot_enabled", True):
+        return
+    if not await _bot_is_group_admin(message, context, db):
+        return
+    if not query:
+        await message.reply_text("Use /search <movie or series name>.")
+        return
+    await _run_search(update, context, db, query)
 
 
 async def bot_membership_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1459,7 +1504,10 @@ async def group_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not message:
         return
     user = update.effective_user
-    if message.text and not message.text.startswith("/") and user and not user.is_bot:
+    text = message.text or ""
+    command_query = await _search_command_text(text, context)
+    query = command_query if command_query is not None else (text if text and not text.startswith("/") else None)
+    if query is not None and user and not user.is_bot:
         settings = await db.get_settings()
         if not settings.get("group_search_enabled", True):
             return
@@ -1470,7 +1518,10 @@ async def group_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if not _is_admin(user.id, admins) and not await _is_subscribed(update, context, db):
             await _show_join_gate(update, context, db)
             return
-        await _run_search(update, context, db, message.text)
+        if not query.strip():
+            await message.reply_text("Use /search <movie or series name>.")
+            return
+        await _run_search(update, context, db, query)
         return
     await _save_new_source_message(message, db)
 
@@ -1524,6 +1575,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     db, _, admins = _services(context)
     user = update.effective_user
+    search_data = _search_state(update, context)
     await db.register_member(user)
     if data == "sub:check":
         if not await _is_subscribed(update, context, db):
@@ -1541,7 +1593,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text("You are verified. Send a movie or series name to search.")
     elif data == "search:back":
         await query.answer()
-        context.user_data.pop("search_hits", None)
+        search_data.pop("search_hits", None)
         await query.message.reply_text("Send a movie or series name to search.")
     elif data == "search:results":
         await query.answer()
@@ -1549,7 +1601,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data.startswith("filter:"):
         await query.answer()
         kind = data.split(":", 1)[1]
-        values = context.user_data.get("filter_values", {}).get(kind, [])
+        values = search_data.get("filter_values", {}).get(kind, [])
         if not values:
             await query.edit_message_text(
                 f"No {kind} options are indexed for these results.",
@@ -1562,21 +1614,21 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
     elif data.startswith("choose:"):
         _, kind, raw_index = data.split(":", 2)
-        values = context.user_data.get("filter_values", {}).get(kind, [])
+        values = search_data.get("filter_values", {}).get(kind, [])
         try:
             selected = values[int(raw_index)]
         except (IndexError, ValueError):
             await query.answer("That filter expired. Search again.", show_alert=True)
             return
-        context.user_data.setdefault("search_filters", {})[kind] = selected
+        search_data.setdefault("search_filters", {})[kind] = selected
         await query.answer(f"Filter: {selected}")
         await _send_results(update, context, db)
     elif data == "page:picker":
         await query.answer()
         await query.edit_message_reply_markup(
             reply_markup=page_picker_keyboard(
-                context.user_data.get("visible_total", len(context.user_data.get("search_hits", []))),
-                context.user_data.get("current_page", 0),
+                search_data.get("visible_total", len(search_data.get("search_hits", []))),
+                search_data.get("current_page", 0),
             )
         )
     elif data.startswith("page:"):
@@ -1587,8 +1639,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await _show_join_gate(update, context, db)
             return
         await query.answer()
-        hits = context.user_data.get("search_hits", [])
-        filters = context.user_data.get("search_filters", {})
+        hits = search_data.get("search_hits", [])
+        filters = search_data.get("search_filters", {})
         for key, selected in filters.items():
             if key == "languages":
                 hits = [item for item in hits if selected in (item.get("languages") or [])]
@@ -1637,7 +1689,7 @@ async def _deliver_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, db:
     settings = await db.get_settings()
     auto_delete = settings.get("auto_delete", {})
     try:
-        forwarded = await context.bot.forward_message(
+        copied = await context.bot.copy_message(
             chat_id=chat_id,
             from_chat_id=int(source_chat_id),
             message_id=int(item["source_message_id"]),
@@ -1648,12 +1700,12 @@ async def _deliver_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, db:
             status_message = await update.effective_message.reply_text(
                 f"Auto-delete in {seconds} seconds."
             )
-            await db.make_delivery(chat_id, forwarded.message_id, status_message.message_id, expires)
+            await db.make_delivery(chat_id, copied.message_id, status_message.message_id, expires)
     except TelegramError:
-        logger.exception("Bot API could not forward indexed message %s.", item.get("file_key"))
+        logger.exception("Bot API could not copy indexed message %s.", item.get("file_key"))
         url = _source_link(item)
         await update.effective_message.reply_text(
-            "I could not forward this file. The bot may need access to the source channel.",
+            "I could not copy this file. The bot may need access to the source channel.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Open source file", url=url)]]),
         )
 
