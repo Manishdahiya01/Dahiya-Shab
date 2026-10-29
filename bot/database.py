@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Any
 
 from pymongo import AsyncMongoClient, ASCENDING, DESCENDING, TEXT, UpdateOne
 from pymongo.errors import OperationFailure
+
+from .metadata import parse_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -218,52 +221,47 @@ class Database:
         query = query.strip()[:120]
         if not query:
             return []
+        query_metadata, title_query = _parse_search_query(query)
+        normalized_query = _normalize_search(title_query)
+        query_tokens = list(dict.fromkeys(normalized_query.split()))
+        metadata_conditions = _metadata_search_conditions(query_metadata)
+        if not query_tokens and not metadata_conditions:
+            return []
+
+        search_conditions = []
+        if query_tokens:
+            search_conditions.append(_title_search_filter(normalized_query))
+        search_conditions.extend(metadata_conditions)
+        search_filter = (
+            search_conditions[0]
+            if len(search_conditions) == 1
+            else {"$and": search_conditions}
+        )
         results: list[dict[str, Any]] = []
         try:
             cursor = self.movies.find(
-                {"$text": {"$search": query}},
-                {"score": {"$meta": "textScore"}},
-            ).sort([("score", {"$meta": "textScore"})]).limit(limit)
-            results = await cursor.to_list(length=limit)
-        except OperationFailure:
-            logger.exception("Text search failed; trying escaped regular-expression search.")
-
-        if not results:
-            escaped = re_escape(query)
-            cursor = self.movies.find(
-                {
-                    "$or": [
-                        {"title": {"$regex": escaped, "$options": "i"}},
-                        {"normalized_title": {"$regex": escaped, "$options": "i"}},
-                        {"caption": {"$regex": escaped, "$options": "i"}},
-                    ]
-                }
+                search_filter
             ).sort([("year", DESCENDING), ("title", ASCENDING)]).limit(limit)
             results = await cursor.to_list(length=limit)
+        except OperationFailure:
+            logger.exception("Title search failed; trying fuzzy title matching.")
         if results or not fuzzy_enabled:
             return results
 
-        normalized_query = _normalize_search(query)
-        query_tokens = normalized_query.split()
-        if not query_tokens or not any(len(token) >= 3 for token in query_tokens):
+        if query_tokens and not any(len(token) >= 3 for token in query_tokens):
             return []
 
         candidates = await self.movies.find().sort("indexed_at", DESCENDING).limit(5000).to_list(length=5000)
         scored: list[tuple[float, dict[str, Any]]] = []
         for item in candidates:
-            title = _normalize_search(item.get("normalized_title") or item.get("title") or "")
-            title_tokens = title.split()
-            if not title_tokens:
+            if not _matches_search_metadata(item, query_metadata):
                 continue
-            token_scores = [
-                max(SequenceMatcher(None, token, candidate).ratio() for candidate in title_tokens)
-                for token in query_tokens
-            ]
-            coverage = sum(score >= 0.58 for score in token_scores) / len(token_scores)
-            token_score = sum(token_scores) / len(token_scores)
-            whole_score = SequenceMatcher(None, normalized_query, title).ratio()
-            score = max(whole_score, token_score * 0.8 + coverage * 0.2)
-            if score >= 0.66:
+            if not query_tokens:
+                scored.append((1.0, item))
+                continue
+            title = str(item.get("normalized_title") or item.get("title") or "")
+            score = _fuzzy_title_score(query_tokens, title)
+            if score is not None:
                 scored.append((score, item))
 
         scored.sort(key=lambda pair: pair[0], reverse=True)
@@ -485,9 +483,187 @@ class Database:
 
 
 def re_escape(value: str) -> str:
-    import re
-
     return re.escape(value)
+
+
+def _parse_search_query(query: str) -> tuple[dict[str, Any], str]:
+    parsed = parse_metadata(query)
+    metadata = {
+        key: parsed[key]
+        for key in ("year", "quality", "languages", "season", "episode")
+        if parsed.get(key)
+    }
+    if not metadata:
+        return {}, query
+
+    title_query = parsed.get("title") or ""
+    if title_query == "Untitled file":
+        title_query = ""
+    for language in metadata.get("languages", []):
+        title_query = re.sub(
+            rf"(?<!\w){re.escape(language)}(?!\w)",
+            " ",
+            title_query,
+            flags=re.IGNORECASE,
+        )
+    return metadata, " ".join(title_query.split())
+
+
+def _quality_aliases(value: str) -> set[str]:
+    normalized = str(value).upper()
+    if normalized in {"4K", "UHD", "2160P"}:
+        return {"4K", "UHD", "2160P"}
+    if normalized in {"720P", "HD"}:
+        return {"720P", "HD"}
+    return {normalized}
+
+
+def _metadata_search_conditions(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    conditions = []
+    for field in ("year", "season", "episode"):
+        if metadata.get(field) is not None:
+            conditions.append({field: metadata[field]})
+    if metadata.get("quality"):
+        aliases = sorted(_quality_aliases(metadata["quality"]))
+        conditions.append(
+            {"quality": {"$in": aliases}}
+            if len(aliases) > 1
+            else {
+                "quality": {
+                    "$regex": rf"^{re_escape(aliases[0])}$",
+                    "$options": "i",
+                }
+            }
+        )
+    if metadata.get("languages"):
+        conditions.append({"languages": {"$all": metadata["languages"]}})
+    return conditions
+
+
+def _matches_search_metadata(item: dict[str, Any], metadata: dict[str, Any]) -> bool:
+    fallback = None
+
+    def actual_value(field: str) -> Any:
+        nonlocal fallback
+        value = item.get(field)
+        if value not in (None, "") and not (field == "languages" and value == []):
+            return value
+        if fallback is None:
+            fallback = parse_metadata(
+                str(item.get("caption") or ""),
+                str(item.get("filename") or ""),
+            )
+        return fallback.get(field)
+
+    for field in ("year", "season", "episode"):
+        expected = metadata.get(field)
+        if expected is not None:
+            actual = actual_value(field)
+            try:
+                if int(actual) != int(expected):
+                    return False
+            except (TypeError, ValueError):
+                return False
+
+    quality = metadata.get("quality")
+    if quality:
+        actual_quality = actual_value("quality")
+        if str(actual_quality or "").upper() not in _quality_aliases(quality):
+            return False
+
+    expected_languages = metadata.get("languages") or []
+    if expected_languages:
+        actual_languages = actual_value("languages") or []
+        if isinstance(actual_languages, str):
+            actual_languages = [actual_languages]
+        if not {str(value).casefold() for value in expected_languages} <= {
+            str(value).casefold() for value in actual_languages
+        }:
+            return False
+    return True
+
+
+def _title_search_filter(normalized_query: str) -> dict[str, Any]:
+    query_tokens = list(dict.fromkeys(normalized_query.split()))
+    token_conditions = []
+    for token in query_tokens:
+        pattern = rf"(?<!\w){re_escape(token)}(?!\w)"
+        token_conditions.append(
+            {
+                "$or": [
+                    {"title": {"$regex": pattern, "$options": "i"}},
+                    {"normalized_title": {"$regex": pattern, "$options": "i"}},
+                ]
+            }
+        )
+
+    alternatives: list[dict[str, Any]] = []
+    if token_conditions:
+        # Every query word must occur in the title, in any order.
+        alternatives.append({"$and": token_conditions})
+
+    compact_query = "".join(query_tokens)
+    if compact_query:
+        # Also match when spaces or symbols split a word in the query or title.
+        compact_pattern = r"(?<!\w)" + r"[\W_]*".join(
+            re_escape(character) for character in compact_query
+        ) + r"(?!\w)"
+        alternatives.append(
+            {
+                "$or": [
+                    {"title": {"$regex": compact_pattern, "$options": "i"}},
+                    {"normalized_title": {"$regex": compact_pattern, "$options": "i"}},
+                ]
+            }
+        )
+    return {"$or": alternatives}
+
+
+def _fuzzy_title_score(query_tokens: list[str], title: str) -> float | None:
+    title_tokens = _normalize_search(title).split()
+    if not query_tokens or not title_tokens or len(query_tokens) > len(title_tokens):
+        return None
+
+    options_by_query_token: list[list[tuple[float, int]]] = []
+    for query_token in query_tokens:
+        if len(query_token) < 3:
+            threshold = 1.0
+        elif len(query_token) == 3:
+            threshold = 0.66
+        else:
+            threshold = 0.70
+        options = [
+            (SequenceMatcher(None, query_token, title_token).ratio(), index)
+            for index, title_token in enumerate(title_tokens)
+        ]
+        options = [option for option in options if option[0] >= threshold]
+        if not options:
+            return None
+        options_by_query_token.append(sorted(options, reverse=True))
+
+    # Match the most constrained query words first so one title word cannot
+    # satisfy multiple unrelated query words.
+    match_order = sorted(
+        range(len(query_tokens)),
+        key=lambda index: (len(options_by_query_token[index]), -len(query_tokens[index])),
+    )
+    used_title_tokens: set[int] = set()
+    scores: list[float] = []
+    for query_index in match_order:
+        match = next(
+            (
+                option
+                for option in options_by_query_token[query_index]
+                if option[1] not in used_title_tokens
+            ),
+            None,
+        )
+        if match is None:
+            return None
+        score, title_index = match
+        used_title_tokens.add(title_index)
+        scores.append(score)
+    return sum(scores) / len(scores)
 
 
 def _normalize_search(value: str) -> str:
