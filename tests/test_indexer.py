@@ -1,4 +1,5 @@
 import asyncio
+import copy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from typing import Any
@@ -313,3 +314,95 @@ def test_scan_skips_existing_file_records() -> None:
     final_job = asyncio.run(run_scan())
     assert final_job["indexed"] == 0
     assert final_job["skipped"] == 1
+
+
+def test_pause_saves_checkpoint_and_resume_continues_after_it() -> None:
+    async def run_scans() -> tuple[dict[str, Any], dict[str, Any], list[tuple[str, int]]]:
+        documents = [
+            SimpleNamespace(
+                id=1,
+                media=object(),
+                file=SimpleNamespace(name="First.mkv", mime_type="video/mp4", size=1),
+                message="First",
+            ),
+            SimpleNamespace(
+                id=2,
+                media=object(),
+                file=SimpleNamespace(name="Second.mkv", mime_type="video/mp4", size=1),
+                message="Second",
+            ),
+        ]
+        state: dict[str, Any] = {"job": None}
+        iterated: list[tuple[str, int]] = []
+
+        class FakeClient:
+            def is_connected(self) -> bool:
+                return True
+
+            async def get_entity(self, chat_id: int) -> str:
+                return "entity"
+
+            async def get_messages(self, entity: str, *, limit: int, filter: object) -> object:
+                return SimpleNamespace(
+                    total=2 if isinstance(filter, InputMessagesFilterDocument) else 0
+                )
+
+            async def iter_messages(
+                self,
+                entity: str,
+                *,
+                reverse: bool,
+                filter: object,
+                min_id: int = 0,
+            ):
+                name = "documents" if isinstance(filter, InputMessagesFilterDocument) else "videos"
+                iterated.append((name, min_id))
+                selected = documents if name == "documents" else []
+                for message in selected:
+                    if message.id > min_id:
+                        yield message
+
+        db = SimpleNamespace(
+            sources=SimpleNamespace(find_one=AsyncMock(return_value={"title": "Movies"})),
+            get_latest_index_job=AsyncMock(
+                side_effect=lambda chat_id: copy.deepcopy(state["job"])
+            ),
+            save_movie=AsyncMock(return_value=True),
+        )
+        bot = SimpleNamespace(
+            send_message=AsyncMock(return_value=SimpleNamespace(message_id=77)),
+            edit_message_text=AsyncMock(),
+        )
+        indexer = HistoricalIndexer(
+            SimpleNamespace(historical_indexing_enabled=True),
+            db,
+            bot,
+        )
+        indexer.client = FakeClient()
+        should_pause = True
+
+        async def persist_job(job_id: str, job: dict[str, Any]) -> None:
+            nonlocal should_pause
+            snapshot = copy.deepcopy(job)
+            snapshot["_id"] = job_id
+            state["job"] = snapshot
+            if should_pause and snapshot.get("files_processed") == 1 and snapshot.get("status") == "running":
+                should_pause = False
+                assert indexer.request_pause(-100123) is True
+
+        db.set_index_job = AsyncMock(side_effect=persist_job)
+
+        await indexer.scan_chat(-100123, 7)
+        paused_job = copy.deepcopy(state["job"])
+        await indexer.scan_chat(-100123, 7, resume=True)
+        completed_job = copy.deepcopy(state["job"])
+        return paused_job, completed_job, iterated
+
+    paused_job, completed_job, iterated = asyncio.run(run_scans())
+    assert paused_job["status"] == "paused"
+    assert paused_job["files_processed"] == 1
+    assert paused_job["filter_cursors"]["documents"] == 1
+    assert completed_job["status"] == "completed"
+    assert completed_job["files_processed"] == 2
+    assert completed_job["indexed"] == 2
+    assert iterated == [("documents", 0), ("documents", 1), ("videos", 0)]

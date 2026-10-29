@@ -53,6 +53,14 @@ class HistoricalIndexer:
         self.client: TelegramClient | None = None
         self.error: str | None = None
         self.running_chats: set[str] = set()
+        self.pause_requested_chats: set[str] = set()
+
+    def request_pause(self, chat_id: int | str) -> bool:
+        normalized_chat_id = str(chat_id)
+        if normalized_chat_id not in self.running_chats:
+            return False
+        self.pause_requested_chats.add(normalized_chat_id)
+        return True
 
     async def start(self) -> None:
         if not self.config.historical_indexing_enabled:
@@ -242,12 +250,39 @@ class HistoricalIndexer:
             except Exception:
                 logger.exception("Could not send historical-index progress message.")
 
+            async def pause_if_requested() -> bool:
+                if normalized_chat_id not in self.pause_requested_chats:
+                    return False
+                job.update(
+                    {
+                        "status": "paused",
+                        "paused_at": utc_now(),
+                        "updated_at": utc_now(),
+                        "error": None,
+                    }
+                )
+                await self.db.set_index_job(job_id, job)
+                if progress_message_id:
+                    try:
+                        await self.bot.edit_message_text(
+                            chat_id=admin_chat_id,
+                            message_id=progress_message_id,
+                            text=_index_progress_text(source.get("title", normalized_chat_id), job),
+                        )
+                    except Exception:
+                        logger.debug("Could not publish paused indexing status.", exc_info=True)
+                return True
+
             last_update = time.monotonic()
             for filter_name, media_filter in media_filters:
+                if await pause_if_requested():
+                    return
                 if filter_name in job["completed_filters"]:
                     continue
                 job["current_filter"] = filter_name
                 await self.db.set_index_job(job_id, job)
+                if await pause_if_requested():
+                    return
                 cursor = int(job["filter_cursors"].get(filter_name, 0) or 0)
                 async for message in self.client.iter_messages(
                     entity,
@@ -284,7 +319,11 @@ class HistoricalIndexer:
                             except Exception:
                                 logger.debug("Could not update historical-index progress message.", exc_info=True)
                         last_update = time.monotonic()
+                    if await pause_if_requested():
+                        return
 
+                if await pause_if_requested():
+                    return
                 if filter_name not in job["completed_filters"]:
                     job["completed_filters"].append(filter_name)
                 job["updated_at"] = utc_now()
@@ -331,4 +370,5 @@ class HistoricalIndexer:
                     logger.exception("Could not send historical-index failure summary.")
         finally:
             self.running_chats.discard(normalized_chat_id)
+            self.pause_requested_chats.discard(normalized_chat_id)
 

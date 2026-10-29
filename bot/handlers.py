@@ -23,7 +23,7 @@ from telegram.ext import (
 )
 
 from .admins import AdminRegistry
-from .database import Database, movie_key, utc_now
+from .database import DEFAULT_SETTINGS, Database, movie_key, utc_now
 from .indexer import HistoricalIndexer
 from .keyboards import (
     admin_home,
@@ -864,17 +864,29 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "adm:index_status":
         sources = await db.get_sources()
         lines = []
-        resume_buttons = []
+        control_buttons = []
         for source in sources[:30]:
             job = await db.get_latest_index_job(source["chat_id"])
             title = source.get("title") or source["chat_id"]
             if job:
                 line = _index_job_status_line(title, job)
-                if job.get("status") in {"running", "failed", "paused"}:
-                    resume_buttons.append(
+                chat_id = str(source["chat_id"])
+                if (
+                    job.get("status") == "running"
+                    and indexer
+                    and chat_id in indexer.running_chats
+                ):
+                    control_buttons.append(
+                        InlineKeyboardButton(
+                            f"⏸ Pause · {title}"[:55],
+                            callback_data=f"adm:index_pause:{chat_id}",
+                        )
+                    )
+                elif job.get("status") in {"running", "failed", "paused"}:
+                    control_buttons.append(
                         InlineKeyboardButton(
                             f"▶️ Resume · {title}"[:55],
-                            callback_data=f"adm:index_resume:{source['chat_id']}",
+                            callback_data=f"adm:index_resume:{chat_id}",
                         )
                     )
             else:
@@ -883,10 +895,10 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         text = "📈 INDEXING PROGRESS\n" + ("\n".join(lines) if lines else "No index sources configured.")
         rendered_text = text[:3900]
         keyboard_rows = [[InlineKeyboardButton("🔄 Refresh", callback_data="adm:index_status")]]
-        if len(resume_buttons) == 1:
-            keyboard_rows[0].append(resume_buttons[0])
+        if len(control_buttons) == 1:
+            keyboard_rows[0].append(control_buttons[0])
         else:
-            keyboard_rows.extend([[button] for button in resume_buttons])
+            keyboard_rows.extend([[button] for button in control_buttons])
         keyboard_rows.append([InlineKeyboardButton("Back", callback_data="adm:sources")])
         try:
             await query.edit_message_text(
@@ -896,6 +908,27 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         except BadRequest as exc:
             if not _is_message_not_modified_error(exc):
                 raise
+    elif data.startswith("adm:index_pause:"):
+        chat_id = data[len("adm:index_pause:"):]
+        if not indexer or not indexer.request_pause(chat_id):
+            message = (
+                "No active scan is running for this source. Refresh the progress screen; "
+                "if the scan stopped earlier, use Resume."
+            )
+        else:
+            message = (
+                "⏸ Pause requested. The current file will finish and save its checkpoint, "
+                "then indexing will stop. Refresh shortly to confirm it is paused."
+            )
+        await query.edit_message_text(
+            message,
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton("🔄 Refresh", callback_data="adm:index_status")],
+                    [InlineKeyboardButton("Back", callback_data="adm:sources")],
+                ]
+            ),
+        )
     elif data.startswith("adm:index_resume:"):
         chat_id = data[len("adm:index_resume:"):]
         if not indexer:
@@ -1042,18 +1075,39 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         await db.update_settings({"powered_by": "Dahiya Movie Store | Search Zone"})
         await query.edit_message_text("Powered by text reset.", reply_markup=settings_menu(await db.get_settings()))
     elif data == "adm:welcome":
-        current = settings.get("welcome_message") or "Send a movie or series name to search the indexed files."
+        current = settings.get("welcome_message")
+        if not current:
+            current = (
+                "Built-in default:\n"
+                f"{DEFAULT_SETTINGS['welcome_message']}"
+            )
         await query.edit_message_text(
             f"Current welcome message:\n\n{current}",
             reply_markup=InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton("Edit welcome message", callback_data="adm:edit_welcome")],
+                    [InlineKeyboardButton("Edit message", callback_data="adm:edit_welcome"),
+                     InlineKeyboardButton("Reset", callback_data="adm:reset_welcome"),
+                     InlineKeyboardButton("Clear", callback_data="adm:clear_welcome")],
+                    [InlineKeyboardButton("Set URL button", callback_data="adm:set_welcome_button"),
+                     InlineKeyboardButton("Clear URL button", callback_data="adm:clear_welcome_button")],
                     [InlineKeyboardButton("Back", callback_data="adm:settings")],
                 ]
             ),
         )
     elif data == "adm:edit_welcome":
         await _prompt(update, context, "welcome_message", "Send the welcome text users should see (up to 1000 characters).")
+    elif data == "adm:reset_welcome":
+        await db.update_settings({"welcome_message": DEFAULT_SETTINGS["welcome_message"]})
+        await query.edit_message_text(
+            "Welcome message reset to the built-in default.",
+            reply_markup=settings_menu(await db.get_settings()),
+        )
+    elif data == "adm:clear_welcome":
+        await db.update_settings({"welcome_message": ""})
+        await query.edit_message_text(
+            "Custom welcome text cleared. The built-in default will be shown.",
+            reply_markup=settings_menu(await db.get_settings()),
+        )
     elif data == "adm:welcome_button":
         current = settings.get("welcome_button")
         label = f"{current.get('label')} | {current.get('url')}" if isinstance(current, dict) else "Not set"
@@ -1061,13 +1115,13 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
             f"Welcome URL button: {label}",
             reply_markup=InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton("Set / replace button", callback_data="adm:edit_welcome_button"),
-                     InlineKeyboardButton("Clear", callback_data="adm:clear_welcome_button")],
+                    [InlineKeyboardButton("Set URL button", callback_data="adm:set_welcome_button"),
+                     InlineKeyboardButton("Clear URL button", callback_data="adm:clear_welcome_button")],
                     [InlineKeyboardButton("Back", callback_data="adm:settings")],
                 ]
             ),
         )
-    elif data == "adm:edit_welcome_button":
+    elif data in {"adm:set_welcome_button", "adm:edit_welcome_button"}:
         await _prompt(update, context, "welcome_button", "Send button label and URL like: Join channel | https://t.me/example")
     elif data == "adm:clear_welcome_button":
         await db.update_settings({"welcome_button": None})

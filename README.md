@@ -24,8 +24,8 @@ The ZIP contains **18 files**:
 - Results show the requester, measured search time, and admin-editable Powered by text.
 - Admin-only **Admin Panel** button on `/start` (the `/admin` command remains available): dashboard, recent activity/requests, members, index sources, old-file scan, settings, database cleanup, and broadcast.
 - Bot Groups records groups the bot joins and offers a confirmed Leave action. Duplicate Files identifies repeated Telegram file IDs and removes only an index entry after confirmation.
-- Index Sources includes a refreshable progress view for historical scans. Incomplete scans can be resumed from their saved per-filter message checkpoint after a restart or deploy.
-- Bot profile image/description, custom welcome message and URL button, custom reply buttons, and not-found message/URL button can be managed in Settings.
+- Index Sources includes a refreshable progress view for historical scans. Running scans can be paused after the current file is checkpointed, then resumed from that point after a restart or deploy.
+- Bot profile image/description, editable/resettable/clearable welcome message, welcome URL button, custom reply buttons, and not-found message/URL button can be managed in Settings.
 - Auto-delete can be switched on/off, set to 30 seconds, 2 minutes, 5 minutes, or a custom time. A live countdown starts when results are sent; pending deletion timers are stored in MongoDB.
 - Force-subscription can be switched on/off; channels can be added and removed.
 - Database Cleanup removes only indexed file/video records and historical scan checkpoints after admin confirmation. It does not delete Telegram source files, registered sources, settings, members, or subscription links.

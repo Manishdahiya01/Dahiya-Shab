@@ -321,6 +321,135 @@ def test_index_status_refresh_adds_resume_button_even_when_text_is_unchanged() -
     assert "adm:index_resume:-100123" in callbacks
 
 
+def test_running_index_status_offers_pause_and_acknowledges_request() -> None:
+    async def run_case():
+        query = SimpleNamespace(
+            message=SimpleNamespace(text=None, chat_id=7),
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        paused_sources = []
+        indexer = SimpleNamespace(
+            running_chats={"-100123"},
+            request_pause=lambda chat_id: paused_sources.append(chat_id) is None,
+        )
+        db = SimpleNamespace(
+            register_member=AsyncMock(),
+            get_settings=AsyncMock(return_value={}),
+            get_sources=AsyncMock(return_value=[{"chat_id": "-100123", "title": "Movies"}]),
+            get_latest_index_job=AsyncMock(
+                return_value={
+                    "status": "running",
+                    "files_total": 5,
+                    "files_processed": 2,
+                    "indexed": 2,
+                    "skipped": 0,
+                    "errors": 0,
+                }
+            ),
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    "services": {
+                        "db": db,
+                        "indexer": indexer,
+                        "admins": {7},
+                    }
+                }
+            )
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(type=ChatType.PRIVATE),
+        )
+        await _handle_admin_callback(update, context, "adm:index_status")
+        keyboard = query.edit_message_text.await_args.kwargs["reply_markup"]
+        callbacks = {
+            button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+        assert "adm:index_pause:-100123" in callbacks
+        assert "adm:index_resume:-100123" not in callbacks
+
+        await _handle_admin_callback(update, context, "adm:index_pause:-100123")
+        assert paused_sources == ["-100123"]
+        assert "current file will finish" in query.edit_message_text.await_args.args[0]
+        pause_keyboard = query.edit_message_text.await_args.kwargs["reply_markup"]
+        assert pause_keyboard.inline_keyboard[0][0].callback_data == "adm:index_status"
+
+    asyncio.run(run_case())
+
+
+def test_welcome_message_and_button_menus_have_photo_controls() -> None:
+    async def run_case():
+        query = SimpleNamespace(
+            message=SimpleNamespace(text=None, chat_id=7),
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        settings = {
+            "welcome_message": "Search the indexed movies.",
+            "welcome_button": {"label": "Join", "url": "https://t.me/example"},
+        }
+        db = SimpleNamespace(
+            register_member=AsyncMock(),
+            get_settings=AsyncMock(return_value=settings),
+            update_settings=AsyncMock(),
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    "services": {
+                        "db": db,
+                        "indexer": SimpleNamespace(running_chats=set()),
+                        "admins": {7},
+                    }
+                }
+            )
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(type=ChatType.PRIVATE),
+        )
+
+        await _handle_admin_callback(update, context, "adm:welcome")
+        welcome_markup = query.edit_message_text.await_args.kwargs["reply_markup"]
+        welcome_callbacks = {
+            button.callback_data
+            for row in welcome_markup.inline_keyboard
+            for button in row
+        }
+        assert {
+            "adm:edit_welcome",
+            "adm:reset_welcome",
+            "adm:clear_welcome",
+            "adm:set_welcome_button",
+            "adm:clear_welcome_button",
+        } <= welcome_callbacks
+
+        await _handle_admin_callback(update, context, "adm:welcome_button")
+        button_markup = query.edit_message_text.await_args.kwargs["reply_markup"]
+        button_callbacks = {
+            button.callback_data
+            for row in button_markup.inline_keyboard
+            for button in row
+        }
+        assert {"adm:set_welcome_button", "adm:clear_welcome_button"} <= button_callbacks
+
+        await _handle_admin_callback(update, context, "adm:reset_welcome")
+        db.update_settings.assert_awaited_with(
+            {"welcome_message": "Send a movie or series name to search the indexed files."}
+        )
+        await _handle_admin_callback(update, context, "adm:clear_welcome")
+        db.update_settings.assert_awaited_with({"welcome_message": ""})
+
+    asyncio.run(run_case())
+
+
 def test_cleanup_confirmation_deletes_only_indexed_records_and_checkpoints() -> None:
     async def run_case():
         query = SimpleNamespace(
