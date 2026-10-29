@@ -9,6 +9,7 @@ from bot.admins import AdminRegistry
 from bot.handlers import (
     _deliver_movie,
     _filter_values_for_hits,
+    _hydrate_missing_filter_metadata,
     _group_added_by_label,
     _handle_admin_callback,
     _handle_admin_text,
@@ -125,6 +126,29 @@ def test_filter_values_include_counted_seasons_and_episodes() -> None:
     assert values["year"] == ["2018", "2025"]
     assert values["quality"] == ["360P", "1080P"]
     assert values["languages"] == ["English", "Hindi"]
+
+
+def test_filter_values_are_recovered_from_legacy_caption_and_filename() -> None:
+    hits = _hydrate_missing_filter_metadata(
+        [
+            {
+                "caption": "Shinchan Hindi Dubbed 2010",
+                "filename": "Shinchan.S02E03.1080p.mkv",
+                "year": None,
+                "quality": None,
+                "languages": [],
+                "season": None,
+                "episode": None,
+            }
+        ]
+    )
+
+    values = _filter_values_for_hits(hits)
+    assert values["year"] == ["2010"]
+    assert values["quality"] == ["1080P"]
+    assert values["languages"] == ["Hindi"]
+    assert hits[0]["season"] == 2
+    assert hits[0]["episode"] == 3
 
 
 def test_filter_options_keyboard_paginates_in_numeric_order() -> None:
