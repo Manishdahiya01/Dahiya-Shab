@@ -864,66 +864,90 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "adm:index_status":
         sources = await db.get_sources()
         lines = []
+        resume_buttons = []
         for source in sources[:30]:
             job = await db.get_latest_index_job(source["chat_id"])
             title = source.get("title") or source["chat_id"]
             if job:
                 line = _index_job_status_line(title, job)
+                if job.get("status") in {"running", "failed", "paused"}:
+                    resume_buttons.append(
+                        InlineKeyboardButton(
+                            f"▶️ Resume · {title}"[:55],
+                            callback_data=f"adm:index_resume:{source['chat_id']}",
+                        )
+                    )
             else:
                 line = f"• {title}: no historical scan recorded"
             lines.append(line)
         text = "📈 INDEXING PROGRESS\n" + ("\n".join(lines) if lines else "No index sources configured.")
         rendered_text = text[:3900]
-        if query.message and query.message.text == rendered_text:
+        keyboard_rows = [[InlineKeyboardButton("🔄 Refresh", callback_data="adm:index_status")]]
+        if len(resume_buttons) == 1:
+            keyboard_rows[0].append(resume_buttons[0])
+        else:
+            keyboard_rows.extend([[button] for button in resume_buttons])
+        keyboard_rows.append([InlineKeyboardButton("Back", callback_data="adm:sources")])
+        try:
+            await query.edit_message_text(
+                rendered_text,
+                reply_markup=InlineKeyboardMarkup(keyboard_rows),
+            )
+        except BadRequest as exc:
+            if not _is_message_not_modified_error(exc):
+                raise
+    elif data.startswith("adm:index_resume:"):
+        chat_id = data[len("adm:index_resume:"):]
+        if not indexer:
+            await query.edit_message_text(
+                "Historical indexing is not available in this session.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Back", callback_data="adm:index_status")]]
+                ),
+            )
             return
         await query.edit_message_text(
-            rendered_text,
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔄 Refresh", callback_data="adm:index_status")],
-                 [InlineKeyboardButton("Back", callback_data="adm:sources")]]
-            ),
+            "Resuming from the saved checkpoint. Already indexed messages will be skipped."
+        )
+        asyncio.create_task(
+            indexer.scan_chat(
+                chat_id,
+                query.message.chat_id,
+                resume=True,
+            )
         )
     elif data == "adm:cleanup":
-        expired = await db.expired_delivery_count(utc_now())
+        counts = await db.index_data_counts()
         await query.edit_message_text(
-            "🧹 DATABASE CLEANUP\n"
-            f"Expired auto-delete queue records: {expired}\n"
-            "Movie index, members, settings, and source history will not be touched.",
+            "🧹 INDEXED FILE CLEANUP\n"
+            f"Indexed files/videos: {counts['files']}\n"
+            f"Saved scan checkpoints: {counts['checkpoints']}\n\n"
+            "Confirming removes only the bot's indexed file/video records and scan checkpoints. "
+            "Original Telegram files, sources, settings, members, and subscriptions stay unchanged.\n\n"
+            "Delete this index data?",
             reply_markup=InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton("Delete expired messages", callback_data="adm:cleanup:confirm")],
-                    [InlineKeyboardButton("Back", callback_data="adm:home")],
+                    [
+                        InlineKeyboardButton("✅ Yes, delete index", callback_data="adm:cleanup:confirm"),
+                        InlineKeyboardButton("❌ No", callback_data="adm:home"),
+                    ],
                 ]
             ),
         )
     elif data == "adm:cleanup:confirm":
-        removed = 0
-        for delivery in await db.due_deliveries(utc_now()):
-            try:
-                await context.bot.delete_message(
-                    chat_id=delivery["chat_id"],
-                    message_id=delivery["message_id"],
-                )
-            except BadRequest as exc:
-                if "message to delete not found" not in str(exc).lower():
-                    logger.warning("Cleanup could not delete expired message %s: %s", delivery["message_id"], exc)
-                    continue
-            except TelegramError:
-                logger.exception("Cleanup could not delete expired message %s.", delivery["message_id"])
-                continue
-            status_id = delivery.get("status_message_id")
-            if status_id:
-                try:
-                    await context.bot.delete_message(
-                        chat_id=delivery["chat_id"],
-                        message_id=status_id,
-                    )
-                except TelegramError:
-                    logger.debug("Expired countdown message %s was already unavailable.", status_id)
-            await db.remove_delivery(delivery["chat_id"], delivery["message_id"])
-            removed += 1
+        if indexer and indexer.running_chats:
+            await query.edit_message_text(
+                "Cleanup cancelled: a historical scan is still running. Wait for it to stop, then try again. No data was deleted.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Back", callback_data="adm:home")]]
+                ),
+            )
+            return
+        removed = await db.clear_index_data()
         await query.edit_message_text(
-            f"Deleted {removed} expired result/delivery message(s). Movie index data was left unchanged.",
+            f"Cleanup complete: deleted {removed['files']} indexed file/video record(s) "
+            f"and {removed['checkpoints']} scan checkpoint(s). "
+            "Original Telegram files and all bot settings, sources, users, and subscriptions were preserved.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="adm:home")]]),
         )
     elif data.startswith("adm:members:"):

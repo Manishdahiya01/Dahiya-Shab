@@ -112,10 +112,15 @@ class HistoricalIndexer:
             "media_type": "video" if file_data["mime_type"].lower().startswith("video/") else "document",
             "bot_file_id": None,
         }
-        await self.db.save_movie(doc)
-        return True
+        return bool(await self.db.save_movie(doc))
 
-    async def scan_chat(self, chat_id: int | str, admin_chat_id: int) -> None:
+    async def scan_chat(
+        self,
+        chat_id: int | str,
+        admin_chat_id: int,
+        *,
+        resume: bool = False,
+    ) -> None:
         if not self.config.historical_indexing_enabled:
             await self.bot.send_message(
                 admin_chat_id,
@@ -145,6 +150,9 @@ class HistoricalIndexer:
             "skipped": 0,
             "errors": 0,
             "last_message_id": 0,
+            "filter_cursors": {"documents": 0, "videos": 0},
+            "completed_filters": [],
+            "current_filter": "documents",
             "error": None,
         }
         progress_message_id: int | None = None
@@ -153,13 +161,36 @@ class HistoricalIndexer:
             source = await self.db.sources.find_one({"chat_id": normalized_chat_id})
             if not source:
                 raise RuntimeError("This source is not registered in Index groups.")
-            entity = await self.client.get_entity(int(normalized_chat_id))
-            media_filters = (
-                InputMessagesFilterDocument(),
-                InputMessagesFilterVideo(),
+            previous_job = await self.db.get_latest_index_job(normalized_chat_id)
+            resumable_statuses = {"running", "failed", "paused"}
+            can_resume = bool(
+                previous_job and previous_job.get("status") in resumable_statuses
             )
+            if resume and not can_resume:
+                await self.bot.send_message(
+                    admin_chat_id,
+                    "There is no unfinished scan to resume. Start an old-file scan instead.",
+                )
+                return
+            if can_resume and previous_job:
+                job_id = str(previous_job.get("_id") or job_id)
+                job = {
+                    key: value
+                    for key, value in previous_job.items()
+                    if key != "_id"
+                }
+                job["resumed_at"] = utc_now()
+                job["resume_count"] = int(job.get("resume_count", 0) or 0) + 1
+                job["status"] = "running"
+                job["error"] = None
+
+            entity = await self.client.get_entity(int(normalized_chat_id))
+            media_filters = [
+                ("documents", InputMessagesFilterDocument()),
+                ("videos", InputMessagesFilterVideo()),
+            ]
             media_totals = []
-            for media_filter in media_filters:
+            for _, media_filter in media_filters:
                 media_count = await self.client.get_messages(
                     entity,
                     limit=0,
@@ -169,6 +200,38 @@ class HistoricalIndexer:
                     max(0, int(getattr(media_count, "total", 0) or 0))
                 )
             job["files_total"] = sum(media_totals)
+
+            if can_resume:
+                cursors = job.get("filter_cursors")
+                completed_filters = job.get("completed_filters")
+                if not isinstance(cursors, dict):
+                    # Older job records only kept one cursor. Infer which filter
+                    # was active from the completed document count.
+                    legacy_cursor = max(0, int(job.get("last_message_id", 0) or 0))
+                    processed = max(0, int(job.get("files_processed", 0) or 0))
+                    if processed < media_totals[0]:
+                        cursors = {"documents": legacy_cursor, "videos": 0}
+                        completed_filters = []
+                    else:
+                        cursors = {
+                            "documents": legacy_cursor,
+                            "videos": legacy_cursor if processed > media_totals[0] else 0,
+                        }
+                        completed_filters = ["documents"]
+                else:
+                    cursors = {
+                        "documents": max(0, int(cursors.get("documents", 0) or 0)),
+                        "videos": max(0, int(cursors.get("videos", 0) or 0)),
+                    }
+                    completed_filters = list(completed_filters or [])
+                job["filter_cursors"] = cursors
+                job["completed_filters"] = completed_filters
+                job["files_processed"] = max(0, int(job.get("files_processed", 0) or 0))
+                job["indexed"] = max(0, int(job.get("indexed", 0) or 0))
+                job["skipped"] = max(0, int(job.get("skipped", 0) or 0))
+                job["errors"] = max(0, int(job.get("errors", 0) or 0))
+
+            job["updated_at"] = utc_now()
             await self.db.set_index_job(job_id, job)
             try:
                 progress_message = await self.bot.send_message(
@@ -180,27 +243,37 @@ class HistoricalIndexer:
                 logger.exception("Could not send historical-index progress message.")
 
             last_update = time.monotonic()
-            for media_filter in media_filters:
+            for filter_name, media_filter in media_filters:
+                if filter_name in job["completed_filters"]:
+                    continue
+                job["current_filter"] = filter_name
+                await self.db.set_index_job(job_id, job)
+                cursor = int(job["filter_cursors"].get(filter_name, 0) or 0)
                 async for message in self.client.iter_messages(
                     entity,
                     reverse=True,
                     filter=media_filter,
+                    min_id=cursor,
                 ):
+                    message_id = int(message.id)
+                    indexed = await self.index_telethon_message(
+                        message,
+                        normalized_chat_id,
+                        source,
+                    )
                     job["files_processed"] += 1
-                    job["last_message_id"] = int(message.id)
-                    try:
-                        if await self.index_telethon_message(message, normalized_chat_id, source):
-                            job["indexed"] += 1
-                        else:
-                            job["skipped"] += 1
-                    except Exception as exc:
-                        job["errors"] += 1
-                        job["error"] = str(exc)[:500]
-                        raise
+                    job["last_message_id"] = message_id
+                    job["filter_cursors"][filter_name] = message_id
+                    if indexed:
+                        job["indexed"] += 1
+                    else:
+                        job["skipped"] += 1
+                    job["updated_at"] = utc_now()
+                    # Persist after every item. A deploy can then resume from
+                    # the last completed message instead of rescanning history.
+                    await self.db.set_index_job(job_id, job)
 
                     if job["files_processed"] % 25 == 0 or time.monotonic() - last_update >= 5:
-                        job["updated_at"] = utc_now()
-                        await self.db.set_index_job(job_id, job)
                         if progress_message_id:
                             try:
                                 await self.bot.edit_message_text(
@@ -211,6 +284,11 @@ class HistoricalIndexer:
                             except Exception:
                                 logger.debug("Could not update historical-index progress message.", exc_info=True)
                         last_update = time.monotonic()
+
+                if filter_name not in job["completed_filters"]:
+                    job["completed_filters"].append(filter_name)
+                job["updated_at"] = utc_now()
+                await self.db.set_index_job(job_id, job)
 
             job.update({"status": "completed", "finished_at": utc_now(), "updated_at": utc_now()})
             await self.db.set_index_job(
@@ -229,15 +307,14 @@ class HistoricalIndexer:
         except Exception as exc:
             logger.exception("Historical indexing failed for source %s.", normalized_chat_id)
             job["status"] = "failed"
-            if not job["errors"]:
-                job["errors"] = 1
+            job["errors"] = int(job.get("errors", 0) or 0) + 1
             job["error"] = str(exc)[:500]
             job["finished_at"] = utc_now()
             job["updated_at"] = utc_now()
-            await self.db.set_index_job(
-                job_id,
-                job,
-            )
+            try:
+                await self.db.set_index_job(job_id, job)
+            except Exception:
+                logger.exception("Could not persist the failed indexing checkpoint.")
             if progress_message_id:
                 try:
                     await self.bot.edit_message_text(

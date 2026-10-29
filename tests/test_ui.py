@@ -2,7 +2,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from telegram.constants import ChatMemberStatus
+from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import BadRequest, TelegramError
 
 from bot.admins import AdminRegistry
@@ -106,9 +106,9 @@ def test_admin_home_exposes_sections_without_removed_controls() -> None:
     ]
     assert {"adm:dashboard", "adm:sources", "adm:live", "adm:subscription",
             "adm:requests:0", "adm:broadcast", "adm:timers", "adm:settings",
+            "adm:cleanup",
             "adm:groups"} <= set(callbacks)
     assert "adm:duplicates" not in callbacks
-    assert "adm:cleanup" not in callbacks
     assert "adm:toggle_group_search" not in callbacks
     assert "adm:admins" not in callbacks
 
@@ -262,6 +262,112 @@ def test_admin_menus_expose_brand_and_index_progress_controls() -> None:
     ]
     assert "adm:powered_by" in settings_callbacks
     assert "adm:index_status" in source_callbacks
+
+
+def test_index_status_refresh_adds_resume_button_even_when_text_is_unchanged() -> None:
+    async def run_case():
+        status_text = (
+            "📈 INDEXING PROGRESS\n"
+            "• Movies: RUNNING — 2/5 files processed; 2 indexed, 0 skipped, 0 errors"
+        )
+        query = SimpleNamespace(
+            message=SimpleNamespace(text=status_text, chat_id=7),
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        db = SimpleNamespace(
+            register_member=AsyncMock(),
+            get_settings=AsyncMock(return_value={}),
+            get_sources=AsyncMock(return_value=[{"chat_id": "-100123", "title": "Movies"}]),
+            get_latest_index_job=AsyncMock(
+                return_value={
+                    "status": "running",
+                    "files_total": 5,
+                    "files_processed": 2,
+                    "indexed": 2,
+                    "skipped": 0,
+                    "errors": 0,
+                }
+            ),
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    "services": {
+                        "db": db,
+                        "indexer": SimpleNamespace(running_chats=set()),
+                        "admins": {7},
+                    }
+                }
+            )
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(type=ChatType.PRIVATE),
+        )
+        await _handle_admin_callback(update, context, "adm:index_status")
+        return query
+
+    query = asyncio.run(run_case())
+    query.edit_message_text.assert_awaited_once()
+    keyboard = query.edit_message_text.await_args.kwargs["reply_markup"]
+    callbacks = {
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+    }
+    assert "adm:index_status" in callbacks
+    assert "adm:index_resume:-100123" in callbacks
+
+
+def test_cleanup_confirmation_deletes_only_indexed_records_and_checkpoints() -> None:
+    async def run_case():
+        query = SimpleNamespace(
+            message=SimpleNamespace(text=None, chat_id=7),
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        db = SimpleNamespace(
+            register_member=AsyncMock(),
+            get_settings=AsyncMock(return_value={}),
+            index_data_counts=AsyncMock(return_value={"files": 6000, "checkpoints": 1}),
+            clear_index_data=AsyncMock(return_value={"files": 6000, "checkpoints": 1}),
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    "services": {
+                        "db": db,
+                        "indexer": SimpleNamespace(running_chats=set()),
+                        "admins": {7},
+                    }
+                }
+            )
+        )
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id=7),
+            effective_chat=SimpleNamespace(type=ChatType.PRIVATE),
+        )
+
+        await _handle_admin_callback(update, context, "adm:cleanup")
+        prompt_markup = query.edit_message_text.await_args.kwargs["reply_markup"]
+        prompt_callbacks = {
+            button.callback_data
+            for row in prompt_markup.inline_keyboard
+            for button in row
+        }
+        assert "adm:cleanup:confirm" in prompt_callbacks
+        assert "adm:home" in prompt_callbacks
+        assert "6000" in query.edit_message_text.await_args.args[0]
+        db.clear_index_data.assert_not_awaited()
+
+        await _handle_admin_callback(update, context, "adm:cleanup:confirm")
+        db.clear_index_data.assert_awaited_once_with()
+        assert "deleted 6000 indexed file/video record(s)" in query.edit_message_text.await_args.args[0]
+
+    asyncio.run(run_case())
 
 
 def test_force_sub_menu_exposes_add_remove_and_total_count_actions() -> None:

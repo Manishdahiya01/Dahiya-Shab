@@ -22,15 +22,15 @@ The ZIP contains **18 files**:
 - Channels support `/search <title>` or `/find <title>` when Group search is ON and the bot is an administrator.
 - Blue filenames open the bot's private chat. Inline Get buttons copy a file into the chat where the button was pressed, without a forwarded-source header; Send All copies up to 10 matching files.
 - Results show the requester, measured search time, and admin-editable Powered by text.
-- Admin-only **Admin Panel** button on `/start` (the `/admin` command remains available): dashboard, recent activity/requests, members, index sources, old-file scan, settings, and broadcast.
+- Admin-only **Admin Panel** button on `/start` (the `/admin` command remains available): dashboard, recent activity/requests, members, index sources, old-file scan, settings, database cleanup, and broadcast.
 - Bot Groups records groups the bot joins and offers a confirmed Leave action. Duplicate Files identifies repeated Telegram file IDs and removes only an index entry after confirmation.
-- Index Sources includes a refreshable progress view for historical scans.
+- Index Sources includes a refreshable progress view for historical scans. Incomplete scans can be resumed from their saved per-filter message checkpoint after a restart or deploy.
 - Bot profile image/description, custom welcome message and URL button, custom reply buttons, and not-found message/URL button can be managed in Settings.
 - Auto-delete can be switched on/off, set to 30 seconds, 2 minutes, 5 minutes, or a custom time. A live countdown starts when results are sent; pending deletion timers are stored in MongoDB.
 - Force-subscription can be switched on/off; channels can be added and removed.
-- Database Cleanup only removes expired result/delivery messages after admin confirmation; it does not delete the movie index or member records.
+- Database Cleanup removes only indexed file/video records and historical scan checkpoints after admin confirmation. It does not delete Telegram source files, registered sources, settings, members, or subscription links.
 - New channel posts are indexed when new indexing is enabled.
-- Old channel messages are scanned with a Telegram user session. Re-scanning updates the same channel/message records rather than creating duplicates.
+- Old channel messages are scanned with a Telegram user session. A resumed scan continues after the last saved message and skips source/message records already present in the index.
 - The movie index and settings live in MongoDB. Restarting or deploying new code does not clear indexed files.
 - `/health` reports whether the bot service can reach MongoDB.
 

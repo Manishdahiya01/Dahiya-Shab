@@ -16,6 +16,7 @@ def admin_home(settings: dict[str, Any]) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔎 User Search Requests", callback_data="adm:requests:0"),
          InlineKeyboardButton("📢 Broadcast", callback_data="adm:broadcast")],
         [InlineKeyboardButton("👨‍👩‍👧 Bot Groups", callback_data="adm:groups")],
+        [InlineKeyboardButton("🧹 Database Cleanup", callback_data="adm:cleanup")],
         [InlineKeyboardButton("⏱ Timers & Countdown", callback_data="adm:timers"),
          InlineKeyboardButton("⚙️ Settings", callback_data="adm:settings")],
     ]

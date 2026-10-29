@@ -174,18 +174,20 @@ class Database:
         result = await self.subscriptions.delete_one({"chat_id": chat_id})
         return result.deleted_count > 0
 
-    async def save_movie(self, document: dict[str, Any]) -> None:
+    async def save_movie(self, document: dict[str, Any]) -> bool:
         key = movie_key(document["source_chat_id"], int(document["source_message_id"]))
         document["file_key"] = key
-        document["indexed_at"] = utc_now()
-        await self.movies.update_one(
+        now = utc_now()
+        document["indexed_at"] = now
+        result = await self.movies.update_one(
             {
                 "source_chat_id": str(document["source_chat_id"]),
                 "source_message_id": int(document["source_message_id"]),
             },
-            {"$set": document, "$setOnInsert": {"created_at": utc_now()}},
+            {"$setOnInsert": {**document, "created_at": now}},
             upsert=True,
         )
+        return result.upserted_id is not None
 
     async def save_movies_bulk(self, documents: list[dict[str, Any]]) -> int:
         if not documents:
@@ -376,6 +378,20 @@ class Database:
 
     async def get_latest_index_job(self, chat_id: int | str) -> dict[str, Any] | None:
         return await self.index_jobs.find_one({"chat_id": str(chat_id)}, sort=[("started_at", DESCENDING)])
+
+    async def index_data_counts(self) -> dict[str, int]:
+        return {
+            "files": int(await self.movies.count_documents({})),
+            "checkpoints": int(await self.index_jobs.count_documents({})),
+        }
+
+    async def clear_index_data(self) -> dict[str, int]:
+        files = await self.movies.delete_many({})
+        checkpoints = await self.index_jobs.delete_many({})
+        return {
+            "files": int(files.deleted_count),
+            "checkpoints": int(checkpoints.deleted_count),
+        }
 
     async def get_temporary_admins(self) -> list[dict[str, Any]]:
         return await self.temporary_admins.find(
