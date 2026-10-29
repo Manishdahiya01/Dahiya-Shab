@@ -85,6 +85,19 @@ def test_save_movies_bulk_reports_new_records_without_overwriting_existing() -> 
     }
 
 
+def test_make_delivery_keeps_request_message_id_when_existing_timer_is_refreshed() -> None:
+    async def run_case():
+        db = Database.__new__(Database)
+        db.deliveries = FakeCollection()
+        await db.make_delivery(7, 200, 201, "expires", request_message_id=100)
+        await db.make_delivery(7, 200, 201, "expires-again")
+        return db.deliveries.update_calls
+
+    calls = asyncio.run(run_case())
+    assert calls[0][1]["$set"]["request_message_id"] == 100
+    assert "request_message_id" not in calls[1][1]["$set"]
+
+
 def test_clear_index_data_only_removes_movie_index_and_resume_checkpoints() -> None:
     async def run_case():
         db = Database.__new__(Database)

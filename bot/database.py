@@ -328,18 +328,20 @@ class Database:
         message_id: int,
         status_message_id: int,
         expires_at: Any,
+        request_message_id: int | None = None,
     ) -> None:
+        values = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "status_message_id": status_message_id,
+            "expires_at": expires_at,
+            "last_countdown_edit": None,
+        }
+        if request_message_id is not None:
+            values["request_message_id"] = int(request_message_id)
         await self.deliveries.update_one(
             {"chat_id": chat_id, "message_id": message_id},
-            {
-                "$set": {
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "status_message_id": status_message_id,
-                    "expires_at": expires_at,
-                    "last_countdown_edit": None,
-                }
-            },
+            {"$set": values},
             upsert=True,
         )
 
