@@ -22,6 +22,7 @@ from telegram.ext import (
     filters,
 )
 
+from .admins import AdminRegistry
 from .database import Database, movie_key, utc_now
 from .indexer import HistoricalIndexer
 from .keyboards import (
@@ -35,6 +36,8 @@ from .keyboards import (
     source_list,
     subscription_list,
     subscription_remove_list,
+    temporary_admin_remove_confirmation,
+    temporary_admins_keyboard,
     timer_menu,
 )
 from .metadata import parse_metadata
@@ -42,15 +45,54 @@ from .metadata import parse_metadata
 logger = logging.getLogger(__name__)
 PAGE_SIZE = 10
 MAX_SEND_ALL = 10
+TEMP_ADMIN_DURATIONS = {3600: "1 hour", 86400: "24 hours", 604800: "7 days"}
 
 
-def _services(context: ContextTypes.DEFAULT_TYPE) -> tuple[Database, HistoricalIndexer, frozenset[int]]:
+def _services(context: ContextTypes.DEFAULT_TYPE) -> tuple[Database, HistoricalIndexer, Any]:
     services = context.application.bot_data["services"]
     return services["db"], services["indexer"], services["admins"]
 
 
-def _is_admin(user_id: int | None, admins: frozenset[int]) -> bool:
+def _is_admin(user_id: int | None, admins: Any) -> bool:
     return user_id is not None and user_id in admins
+
+
+def _is_owner(user_id: int | None, admins: Any) -> bool:
+    if user_id is None:
+        return False
+    if isinstance(admins, AdminRegistry):
+        return admins.is_owner(user_id)
+    return user_id in admins
+
+
+def _admin_home(settings: dict[str, Any], user_id: int | None, admins: Any) -> InlineKeyboardMarkup:
+    return admin_home(settings, can_manage_admins=_is_owner(user_id, admins))
+
+
+def _temporary_admins_text(admins: list[dict[str, Any]], total: int, page: int) -> str:
+    lines = [f"🛡 TEMPORARY ADMINS · {total} active"]
+    for item in admins:
+        expires_at = item.get("expires_at")
+        if isinstance(expires_at, datetime):
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            expiry = expires_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        else:
+            expiry = "expiry unavailable"
+        lines.append(f"• ID {item.get('user_id')} — expires {expiry}")
+    if not admins:
+        lines.append("No temporary admins are active.")
+    lines.append(f"Page {page + 1}")
+    return "\n".join(lines)
+
+
+async def _temporary_admin_page(db: Database, page: int) -> tuple[list[dict[str, Any]], int, int]:
+    page_size = 10
+    total = await db.count_temporary_admins()
+    last_page = max(0, (total - 1) // page_size)
+    page = max(0, min(page, last_page))
+    rows = await db.list_temporary_admins(page * page_size, page_size)
+    return rows, total, page
 
 
 async def _is_subscribed(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database) -> bool:
@@ -145,11 +187,15 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text("Open the bot's private chat to use the admin panel.")
         return
     settings = await db.get_settings()
-    await update.effective_message.reply_text("Dahiya Movie Store — Admin Panel", reply_markup=admin_home(settings))
+    await update.effective_message.reply_text(
+        "Dahiya Movie Store — Admin Panel",
+        reply_markup=_admin_home(settings, user.id if user else None, admins),
+    )
 
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("admin_state", None)
+    context.user_data.pop("temporary_admin_duration_seconds", None)
     await update.effective_message.reply_text("Current action cancelled.")
 
 
@@ -481,24 +527,109 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     if not _is_admin(user.id if user else None, admins):
         await query.answer("Not allowed.", show_alert=True)
         return
+    admin_management_action = (
+        data == "adm:admins"
+        or data.startswith("adm:admins:page:")
+        or data.startswith("adm:tempadmin:")
+    )
+    if admin_management_action and (
+        not _is_owner(user.id if user else None, admins)
+        or not update.effective_chat
+        or update.effective_chat.type != ChatType.PRIVATE
+    ):
+        await query.answer(
+            "Only a configured owner can manage admins in the private chat.",
+            show_alert=True,
+        )
+        return
     await db.register_member(user)
     await query.answer()
     settings = await db.get_settings()
 
     if data == "adm:home":
-        await query.edit_message_text("👑 DAHIYA MOVIE STORE — ADMIN PANEL", reply_markup=admin_home(settings))
+        await query.edit_message_text(
+            "👑 DAHIYA MOVIE STORE — ADMIN PANEL",
+            reply_markup=_admin_home(settings, user.id if user else None, admins),
+        )
+    elif data == "adm:admins" or data.startswith("adm:admins:page:"):
+        try:
+            page = int(data.rsplit(":", 1)[1]) if data != "adm:admins" else 0
+        except ValueError:
+            page = 0
+        rows, total, page = await _temporary_admin_page(db, page)
+        await query.edit_message_text(
+            _temporary_admins_text(rows, total, page),
+            reply_markup=temporary_admins_keyboard(rows, page, total),
+        )
+    elif data.startswith("adm:tempadmin:add:"):
+        try:
+            duration_seconds = int(data.rsplit(":", 1)[1])
+        except ValueError:
+            duration_seconds = 0
+        if duration_seconds not in TEMP_ADMIN_DURATIONS:
+            await query.edit_message_text(
+                "Invalid temporary-admin duration.",
+                reply_markup=_admin_home(settings, user.id if user else None, admins),
+            )
+            return
+        context.user_data["admin_state"] = "temporary_admin_id"
+        context.user_data["temporary_admin_duration_seconds"] = duration_seconds
+        await query.message.reply_text(
+            f"Send the numeric Telegram user ID to grant admin access for "
+            f"{TEMP_ADMIN_DURATIONS[duration_seconds]}. The grant expires automatically."
+        )
+    elif data.startswith("adm:tempadmin:confirm_remove:"):
+        match = re.fullmatch(r"adm:tempadmin:confirm_remove:(\d+):(\d+)", data)
+        if not match:
+            await query.edit_message_text(
+                "That temporary-admin entry is invalid.",
+                reply_markup=_admin_home(settings, user.id if user else None, admins),
+            )
+            return
+        user_id, page = (int(value) for value in match.groups())
+        await query.edit_message_text(
+            f"Remove temporary admin ID {user_id}?",
+            reply_markup=temporary_admin_remove_confirmation(user_id, page),
+        )
+    elif data.startswith("adm:tempadmin:remove:"):
+        match = re.fullmatch(r"adm:tempadmin:remove:(\d+):(\d+)", data)
+        if not match:
+            await query.edit_message_text(
+                "That temporary-admin entry is invalid.",
+                reply_markup=_admin_home(settings, user.id if user else None, admins),
+            )
+            return
+        target_id, page = (int(value) for value in match.groups())
+        if _is_owner(target_id, admins):
+            await query.edit_message_text(
+                "Configured owners cannot be removed here.",
+                reply_markup=_admin_home(settings, user.id if user else None, admins),
+            )
+            return
+        removed = await db.remove_temporary_admin(target_id)
+        if isinstance(admins, AdminRegistry):
+            admins.remove_temporary_admin(target_id)
+        rows, total, page = await _temporary_admin_page(db, page)
+        await query.edit_message_text(
+            f"{'Temporary admin removed.' if removed else 'That temporary admin was not found.'}\n\n"
+            + _temporary_admins_text(rows, total, page),
+            reply_markup=temporary_admins_keyboard(rows, page, total),
+        )
     elif data == "adm:toggle_group_search":
         enabled = not settings.get("group_search_enabled", True)
         await db.update_settings({"group_search_enabled": enabled})
         updated = await db.get_settings()
         await query.edit_message_text(
             f"Group replies are now {'ON' if enabled else 'OFF'}.",
-            reply_markup=admin_home(updated),
+            reply_markup=_admin_home(updated, user.id if user else None, admins),
         )
     elif data == "adm:toggle_bot":
         enabled = not settings.get("bot_enabled", True)
         await db.update_settings({"bot_enabled": enabled})
-        await query.edit_message_text("👑 DAHIYA MOVIE STORE — ADMIN PANEL", reply_markup=admin_home(await db.get_settings()))
+        await query.edit_message_text(
+            "👑 DAHIYA MOVIE STORE — ADMIN PANEL",
+            reply_markup=_admin_home(await db.get_settings(), user.id if user else None, admins),
+        )
     elif data == "adm:dashboard":
         stats = await db.request_stats()
         members = await db.count_members()
@@ -1002,12 +1133,50 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.reply_text(f"Broadcast complete. Sent: {sent}; failed: {failed}.")
 
 
-async def _handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Database) -> bool:
+async def _handle_admin_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    db: Database,
+    admins: Any,
+) -> bool:
     state = context.user_data.get("admin_state")
     if not state:
         return False
     text = (update.effective_message.text or "").strip()
-    if state == "powered_by":
+    if state == "temporary_admin_id":
+        user = update.effective_user
+        if not _is_owner(user.id if user else None, admins):
+            context.user_data.pop("admin_state", None)
+            context.user_data.pop("temporary_admin_duration_seconds", None)
+            await update.effective_message.reply_text("Only a configured owner can add temporary admins.")
+            return True
+        if not text.isascii() or not text.isdigit():
+            await update.effective_message.reply_text("Send a numeric Telegram user ID.")
+            return True
+        target_id = int(text)
+        if not 0 < target_id <= 2**63 - 1 or target_id == context.bot.id:
+            await update.effective_message.reply_text("That Telegram user ID is not valid.")
+            return True
+        if _is_owner(target_id, admins):
+            await update.effective_message.reply_text("Configured owners already have permanent admin access.")
+            return True
+        duration_seconds = context.user_data.get("temporary_admin_duration_seconds")
+        if duration_seconds not in TEMP_ADMIN_DURATIONS:
+            context.user_data.pop("admin_state", None)
+            await update.effective_message.reply_text("The temporary-admin request expired. Start again from Admin Panel.")
+            return True
+        expires_at = utc_now() + timedelta(seconds=duration_seconds)
+        await db.grant_temporary_admin(target_id, user.id, expires_at)
+        if isinstance(admins, AdminRegistry):
+            admins.add_temporary_admin(target_id, expires_at)
+        context.user_data.pop("admin_state", None)
+        context.user_data.pop("temporary_admin_duration_seconds", None)
+        rows, total, page = await _temporary_admin_page(db, 0)
+        await update.effective_message.reply_text(
+            f"Temporary admin ID {target_id} added for {TEMP_ADMIN_DURATIONS[duration_seconds]}.",
+            reply_markup=temporary_admins_keyboard(rows, page, total),
+        )
+    elif state == "powered_by":
         if not text or len(text) > 120:
             await update.effective_message.reply_text("Send Powered by text between 1 and 120 characters.")
             return True
@@ -1187,7 +1356,7 @@ async def private_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not user:
         return
     await db.register_member(user)
-    if _is_admin(user.id, admins) and await _handle_admin_text(update, context, db):
+    if _is_admin(user.id, admins) and await _handle_admin_text(update, context, db, admins):
         return
     settings = await db.get_settings()
     if not settings.get("bot_enabled", True) and not _is_admin(user.id, admins):

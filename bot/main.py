@@ -12,6 +12,7 @@ from telegram.error import BadRequest, TelegramError
 from telegram.ext import Application
 
 from .config import Config
+from .admins import AdminRegistry
 from .database import Database
 from .handlers import register_handlers
 from .indexer import HistoricalIndexer
@@ -118,6 +119,10 @@ async def run() -> None:
 
     db = Database(config.mongo_uri, config.mongo_database)
     await db.connect()
+    admins = AdminRegistry(
+        config.admin_user_ids,
+        await db.get_temporary_admins(),
+    )
 
     application = (
         Application.builder()
@@ -134,7 +139,7 @@ async def run() -> None:
     application.bot_data["services"] = {
         "db": db,
         "indexer": indexer,
-        "admins": config.admin_user_ids,
+        "admins": admins,
     }
     register_handlers(application)
 

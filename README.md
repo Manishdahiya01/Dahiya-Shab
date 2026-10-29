@@ -94,7 +94,8 @@ The service listens on `PORT` (default `10000`) and exposes `http://localhost:10
 
 ## Admin panel actions
 
-- `/admin` opens the control panel. Only IDs in `ADMIN_USER_IDS` can use it.
+- `/admin` opens the control panel. IDs in `ADMIN_USER_IDS` are permanent owners; they can grant or remove temporary admins.
+- **Temporary Admins** lets a configured owner grant admin access for 1 hour, 24 hours, or 7 days. Grants expire automatically; temporary admins cannot grant or remove admin access.
 - **Settings** contains the profile image/description, welcome message/buttons, fuzzy search, auto-delete, new-indexing, subscription, and not-found message/button controls.
 - **Settings** also controls the Powered by line shown on search results.
 - **Index Sources** adds/removes sources, toggles new-file indexing, and starts old-file scans. Removing a source does not delete its existing movie records.

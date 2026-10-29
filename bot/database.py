@@ -60,6 +60,7 @@ class Database:
         self.deliveries = self.db.pending_deletions
         self.index_jobs = self.db.index_jobs
         self.bot_groups = self.db.bot_groups
+        self.temporary_admins = self.db.temporary_admins
 
     async def connect(self) -> None:
         await self.client.admin.command("ping")
@@ -82,6 +83,8 @@ class Database:
         await self.deliveries.create_index("expires_at")
         await self.index_jobs.create_index([("chat_id", ASCENDING), ("started_at", DESCENDING)])
         await self.bot_groups.create_index("chat_id", unique=True)
+        await self.temporary_admins.create_index("user_id", unique=True)
+        await self.temporary_admins.create_index("expires_at", expireAfterSeconds=0)
         logger.info("MongoDB connection established and indexes are ready.")
 
     async def close(self) -> None:
@@ -373,6 +376,50 @@ class Database:
 
     async def get_latest_index_job(self, chat_id: int | str) -> dict[str, Any] | None:
         return await self.index_jobs.find_one({"chat_id": str(chat_id)}, sort=[("started_at", DESCENDING)])
+
+    async def get_temporary_admins(self) -> list[dict[str, Any]]:
+        return await self.temporary_admins.find(
+            {"expires_at": {"$gt": utc_now()}}
+        ).sort("expires_at", ASCENDING).to_list(length=None)
+
+    async def list_temporary_admins(self, offset: int = 0, limit: int = 10) -> list[dict[str, Any]]:
+        safe_offset = max(0, int(offset))
+        safe_limit = max(1, min(int(limit), 50))
+        return await (
+            self.temporary_admins.find({"expires_at": {"$gt": utc_now()}})
+            .sort("expires_at", ASCENDING)
+            .skip(safe_offset)
+            .limit(safe_limit)
+            .to_list(length=safe_limit)
+        )
+
+    async def count_temporary_admins(self) -> int:
+        return await self.temporary_admins.count_documents({"expires_at": {"$gt": utc_now()}})
+
+    async def grant_temporary_admin(
+        self,
+        user_id: int,
+        granted_by_id: int,
+        expires_at: datetime,
+    ) -> None:
+        now = utc_now()
+        await self.temporary_admins.update_one(
+            {"user_id": int(user_id)},
+            {
+                "$set": {
+                    "user_id": int(user_id),
+                    "granted_by_id": int(granted_by_id),
+                    "expires_at": expires_at,
+                    "updated_at": now,
+                },
+                "$setOnInsert": {"created_at": now},
+            },
+            upsert=True,
+        )
+
+    async def remove_temporary_admin(self, user_id: int) -> bool:
+        result = await self.temporary_admins.delete_one({"user_id": int(user_id)})
+        return result.deleted_count > 0
 
     async def save_bot_group(
         self,

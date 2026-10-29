@@ -5,9 +5,12 @@ from unittest.mock import AsyncMock
 from telegram.constants import ChatMemberStatus
 from telegram.error import BadRequest
 
+from bot.admins import AdminRegistry
 from bot.handlers import (
     _deliver_movie,
     _group_added_by_label,
+    _handle_admin_callback,
+    _handle_admin_text,
     _index_job_status_line,
     _is_message_not_modified_error,
     _result_line,
@@ -27,6 +30,8 @@ from bot.keyboards import (
     source_list,
     subscription_list,
     subscription_remove_list,
+    temporary_admin_remove_confirmation,
+    temporary_admins_keyboard,
 )
 
 
@@ -106,6 +111,141 @@ def test_admin_home_exposes_requested_sections() -> None:
         if button.callback_data == "adm:toggle_group_search"
     )
     assert group_button.text == "Group replies: OFF"
+
+
+def test_only_configured_owners_see_temporary_admin_management() -> None:
+    owner_callbacks = {
+        button.callback_data
+        for row in admin_home({}, can_manage_admins=True).inline_keyboard
+        for button in row
+    }
+    regular_admin_callbacks = {
+        button.callback_data
+        for row in admin_home({}, can_manage_admins=False).inline_keyboard
+        for button in row
+    }
+    assert "adm:admins" in owner_callbacks
+    assert "adm:admins" not in regular_admin_callbacks
+
+
+def test_temporary_admin_controls_offer_expiry_and_confirm_removal() -> None:
+    keyboard = temporary_admins_keyboard(
+        [{"user_id": 123456, "expires_at": None}],
+        page=0,
+        total=1,
+    )
+    callbacks = {
+        button.callback_data
+        for row in keyboard.inline_keyboard
+        for button in row
+    }
+    assert "adm:tempadmin:add:3600" in callbacks
+    assert "adm:tempadmin:add:86400" in callbacks
+    assert "adm:tempadmin:add:604800" in callbacks
+    assert "adm:tempadmin:confirm_remove:123456:0" in callbacks
+    confirm_callbacks = [
+        button.callback_data
+        for row in temporary_admin_remove_confirmation(123456, 0).inline_keyboard
+        for button in row
+    ]
+    assert "adm:tempadmin:remove:123456:0" in confirm_callbacks
+
+
+def test_temporary_admin_registry_keeps_owner_and_expires_grants() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    registry = AdminRegistry(
+        {7},
+        [
+            {"user_id": 8, "expires_at": now + timedelta(hours=1)},
+            {"user_id": 9, "expires_at": now - timedelta(seconds=1)},
+        ],
+    )
+    assert 7 in registry
+    assert registry.is_owner(7)
+    assert 8 in registry
+    assert not registry.is_owner(8)
+    assert 9 not in registry
+    registry.remove_temporary_admin(8)
+    assert 8 not in registry
+
+
+def test_temporary_admin_cannot_manage_other_admins() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    async def run_case() -> AsyncMock:
+        registry = AdminRegistry(
+            {7},
+            [{"user_id": 8, "expires_at": datetime.now(timezone.utc) + timedelta(hours=1)}],
+        )
+        answer = AsyncMock()
+        db = SimpleNamespace(register_member=AsyncMock())
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(answer=answer),
+            effective_user=SimpleNamespace(id=8),
+            effective_chat=SimpleNamespace(type="private"),
+        )
+        context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    "services": {
+                        "db": db,
+                        "indexer": None,
+                        "admins": registry,
+                    }
+                }
+            )
+        )
+        await _handle_admin_callback(update, context, "adm:admins")
+        db.register_member.assert_not_awaited()
+        return answer
+
+    answer = asyncio.run(run_case())
+    answer.assert_awaited_once_with(
+        "Only a configured owner can manage admins in the private chat.",
+        show_alert=True,
+    )
+
+
+def test_configured_owner_can_grant_a_temporary_admin() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    async def run_case() -> tuple[SimpleNamespace, SimpleNamespace, AdminRegistry]:
+        expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+        db = SimpleNamespace(
+            grant_temporary_admin=AsyncMock(),
+            count_temporary_admins=AsyncMock(return_value=1),
+            list_temporary_admins=AsyncMock(
+                return_value=[{"user_id": 8, "expires_at": expiry}]
+            ),
+        )
+        registry = AdminRegistry({7})
+        reply = AsyncMock()
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=7),
+            effective_message=SimpleNamespace(text="8", reply_text=reply),
+        )
+        context = SimpleNamespace(
+            user_data={
+                "admin_state": "temporary_admin_id",
+                "temporary_admin_duration_seconds": 3600,
+            },
+            bot=SimpleNamespace(id=99),
+        )
+        handled = await _handle_admin_text(update, context, db, registry)
+        assert handled
+        assert 8 in registry
+        return db, context, registry
+
+    db, context, _ = asyncio.run(run_case())
+    db.grant_temporary_admin.assert_awaited_once()
+    assert db.grant_temporary_admin.await_args.args[:2] == (8, 7)
+    assert abs(
+        (db.grant_temporary_admin.await_args.args[2] - datetime.now(timezone.utc)).total_seconds()
+        - 3600
+    ) < 5
+    assert "admin_state" not in context.user_data
 
 
 def test_result_header_shows_requester_timing_and_admin_branding() -> None:

@@ -5,13 +5,15 @@ from typing import Any
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-def admin_home(settings: dict[str, Any]) -> InlineKeyboardMarkup:
+def admin_home(
+    settings: dict[str, Any],
+    can_manage_admins: bool = False,
+) -> InlineKeyboardMarkup:
     bot_label = "Bot: ON" if settings.get("bot_enabled", True) else "Bot: OFF"
     group_replies_label = (
         f"Group replies: {'ON' if settings.get('group_search_enabled', True) else 'OFF'}"
     )
-    return InlineKeyboardMarkup(
-        [
+    rows = [
             [InlineKeyboardButton(f"👑 DAHIYA MOVIE STORE ADMIN · {bot_label}", callback_data="adm:dashboard")],
             [InlineKeyboardButton("📊 Dashboard", callback_data="adm:dashboard"),
              InlineKeyboardButton("📁 Index Sources", callback_data="adm:sources")],
@@ -23,6 +25,62 @@ def admin_home(settings: dict[str, Any]) -> InlineKeyboardMarkup:
              InlineKeyboardButton(group_replies_label, callback_data="adm:toggle_group_search")],
             [InlineKeyboardButton("⏱ Timers & Countdown", callback_data="adm:timers"),
              InlineKeyboardButton("⚙️ Settings", callback_data="adm:settings")],
+        ]
+    if can_manage_admins:
+        rows.insert(
+            5,
+            [InlineKeyboardButton("🛡 Temporary Admins", callback_data="adm:admins")],
+        )
+    return InlineKeyboardMarkup(rows)
+
+
+def temporary_admins_keyboard(
+    admins: list[dict[str, Any]],
+    page: int,
+    total: int,
+    page_size: int = 10,
+) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"Remove ID {int(admin['user_id'])}",
+                callback_data=f"adm:tempadmin:confirm_remove:{int(admin['user_id'])}:{page}",
+            )
+        ]
+        for admin in admins
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton("Add · 1 hour", callback_data="adm:tempadmin:add:3600"),
+            InlineKeyboardButton("Add · 24 hours", callback_data="adm:tempadmin:add:86400"),
+            InlineKeyboardButton("Add · 7 days", callback_data="adm:tempadmin:add:604800"),
+        ]
+    )
+    navigation = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton("← Previous", callback_data=f"adm:admins:page:{page - 1}")
+        )
+    if (page + 1) * page_size < total:
+        navigation.append(
+            InlineKeyboardButton("Next →", callback_data=f"adm:admins:page:{page + 1}")
+        )
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton("Back", callback_data="adm:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def temporary_admin_remove_confirmation(user_id: int, page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Confirm remove",
+                    callback_data=f"adm:tempadmin:remove:{int(user_id)}:{page}",
+                ),
+                InlineKeyboardButton("Cancel", callback_data=f"adm:admins:page:{page}"),
+            ]
         ]
     )
 
