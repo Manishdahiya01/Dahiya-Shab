@@ -18,7 +18,7 @@ The ZIP contains **18 files**:
 
 ## What works
 
-- `/start` and free-text movie/series search work in private chats; groups also support text searches and `/search <title>` or `/find <title>` when Group search is ON.
+- `/start` and free-text movie/series search work in private chats; groups also support ordinary text searches, including anonymous-admin messages, and `/search <title>` or `/find <title>` when Group search is ON.
 - Channels support `/search <title>` or `/find <title>` when Group search is ON and the bot is an administrator.
 - Blue filenames open the bot's private chat. Inline Get buttons copy a file into the chat where the button was pressed, without a forwarded-source header; Send All copies up to 10 matching files.
 - Results show the requester, measured search time, and admin-editable Powered by text.
