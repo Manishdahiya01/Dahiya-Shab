@@ -10,6 +10,8 @@ from bot.handlers import (
     _deliver_movie,
     _filter_values_for_hits,
     _hydrate_missing_filter_metadata,
+    _matches_language_filter,
+    _matches_quality_filter,
     _group_added_by_label,
     _handle_admin_callback,
     _handle_admin_text,
@@ -107,7 +109,7 @@ def test_filter_values_include_counted_seasons_and_episodes() -> None:
             {
                 "year": 2025,
                 "quality": "1080P",
-                "languages": ["Hindi"],
+                "languages": ["Hindi", "Tamil"],
                 "season": 3,
                 "episode": 4,
             },
@@ -123,9 +125,10 @@ def test_filter_values_include_counted_seasons_and_episodes() -> None:
 
     assert values["season"] == [str(number) for number in range(1, 51)]
     assert values["episode"] == [str(number) for number in range(1, 101)]
-    assert values["year"] == ["2018", "2025"]
-    assert values["quality"] == ["360P", "1080P"]
-    assert values["languages"] == ["English", "Hindi"]
+    assert values["year"] == [str(year) for year in range(1970, 2081)]
+    assert values["quality"] == ["360P", "480P", "1080P", "4K"]
+    assert values["languages"][:4] == ["Hindi", "Hind", "English", "Eng"]
+    assert "Tamil" in values["languages"]
 
 
 def test_filter_values_are_recovered_from_legacy_caption_and_filename() -> None:
@@ -144,11 +147,18 @@ def test_filter_values_are_recovered_from_legacy_caption_and_filename() -> None:
     )
 
     values = _filter_values_for_hits(hits)
-    assert values["year"] == ["2010"]
-    assert values["quality"] == ["1080P"]
-    assert values["languages"] == ["Hindi"]
+    assert "2010" in values["year"]
+    assert "1080P" in values["quality"]
+    assert "Hindi" in values["languages"]
     assert hits[0]["season"] == 2
     assert hits[0]["episode"] == 3
+
+
+def test_filter_aliases_match_full_and_short_metadata_values() -> None:
+    assert _matches_language_filter({"languages": ["Hind"]}, "Hindi")
+    assert _matches_language_filter({"languages": ["English"]}, "Eng")
+    assert _matches_quality_filter({"quality": "UHD"}, "4K")
+    assert _matches_quality_filter({"quality": "2160P"}, "4K")
 
 
 def test_filter_options_keyboard_paginates_in_numeric_order() -> None:
