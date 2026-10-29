@@ -197,16 +197,17 @@ class Database:
             doc["source_chat_id"] = str(doc["source_chat_id"])
             doc["source_message_id"] = int(doc["source_message_id"])
             doc["file_key"] = movie_key(doc["source_chat_id"], doc["source_message_id"])
-            doc["indexed_at"] = utc_now()
+            now = utc_now()
+            doc["indexed_at"] = now
             operations.append(
                 UpdateOne(
                     {"source_chat_id": doc["source_chat_id"], "source_message_id": doc["source_message_id"]},
-                    {"$set": doc, "$setOnInsert": {"created_at": utc_now()}},
+                    {"$setOnInsert": {**doc, "created_at": now}},
                     upsert=True,
                 )
             )
-        await self.movies.bulk_write(operations, ordered=False)
-        return len(operations)
+        result = await self.movies.bulk_write(operations, ordered=False)
+        return int(result.upserted_count)
 
     async def search_movies(
         self,

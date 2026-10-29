@@ -24,6 +24,18 @@ class FakeCollection:
         return SimpleNamespace(upserted_id=self.upserted_id)
 
 
+class FakeBulkCollection:
+    def __init__(self, upserted_count: int):
+        self.upserted_count = upserted_count
+        self.operations = []
+        self.ordered = None
+
+    async def bulk_write(self, operations, *, ordered):
+        self.operations = operations
+        self.ordered = ordered
+        return SimpleNamespace(upserted_count=self.upserted_count)
+
+
 def test_save_movie_inserts_once_without_rewriting_existing_index_records() -> None:
     async def run_case():
         db = Database.__new__(Database)
@@ -48,6 +60,29 @@ def test_save_movie_inserts_once_without_rewriting_existing_index_records() -> N
     assert "$setOnInsert" in update
     assert "$set" not in update
     assert "$setOnInsert" in duplicate_update
+
+
+def test_save_movies_bulk_reports_new_records_without_overwriting_existing() -> None:
+    async def run_case():
+        db = Database.__new__(Database)
+        db.movies = FakeBulkCollection(upserted_count=1)
+        documents = [
+            {"source_chat_id": -100123, "source_message_id": 42, "filename": "Movie.mkv"},
+            {"source_chat_id": "-100123", "source_message_id": 43, "filename": "Clip.mp4"},
+        ]
+        inserted = await db.save_movies_bulk(documents)
+        return inserted, db.movies
+
+    inserted, movies = asyncio.run(run_case())
+    assert inserted == 1
+    assert movies.ordered is False
+    assert len(movies.operations) == 2
+    assert all("$setOnInsert" in operation._doc for operation in movies.operations)
+    assert all("$set" not in operation._doc for operation in movies.operations)
+    assert movies.operations[0]._filter == {
+        "source_chat_id": "-100123",
+        "source_message_id": 42,
+    }
 
 
 def test_clear_index_data_only_removes_movie_index_and_resume_checkpoints() -> None:
