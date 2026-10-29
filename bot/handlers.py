@@ -455,6 +455,9 @@ async def _run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Da
         return
     started = time.perf_counter()
     user = update.effective_user
+    message = update.effective_message
+    if message and getattr(message, "sender_chat", None) is not None:
+        user = None
     if user:
         await db.register_member(user)
         await db.record_request(user, query)
@@ -1523,18 +1526,20 @@ async def group_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not message:
         return
     user = update.effective_user
+    anonymous_sender = getattr(message, "sender_chat", None) is not None
+    search_user = None if anonymous_sender else user
     text = message.text or ""
     command_query = await _search_command_text(text, context)
     query = command_query if command_query is not None else (text if text and not text.startswith("/") else None)
-    if query is not None and (user is None or not user.is_bot):
+    if query is not None and (anonymous_sender or user is None or not user.is_bot):
         settings = await db.get_settings()
         if not settings.get("group_search_enabled", True):
             return
-        if not settings.get("bot_enabled", True) and not _is_admin(user.id if user else None, admins):
+        if not settings.get("bot_enabled", True) and not _is_admin(search_user.id if search_user else None, admins):
             return
         if not await _bot_is_group_admin(message, context, db):
             return
-        if user and not _is_admin(user.id, admins) and not await _is_subscribed(update, context, db):
+        if search_user and not _is_admin(search_user.id, admins) and not await _is_subscribed(update, context, db):
             await _show_join_gate(update, context, db)
             return
         if not query.strip():
