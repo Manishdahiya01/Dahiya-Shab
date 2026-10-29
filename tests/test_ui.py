@@ -16,6 +16,7 @@ from bot.handlers import (
     _result_line,
     _result_header,
     _search_state,
+    _schedule_result_auto_delete,
     _send_results,
     _subscription_count_text,
     _check_subscriptions,
@@ -771,6 +772,36 @@ def test_file_delivery_copies_source_without_forward_header() -> None:
     copy.assert_awaited_once_with(chat_id=7, from_chat_id=-100123, message_id=42)
 
 
+def test_auto_delete_schedules_original_search_request_with_result() -> None:
+    async def run_case() -> AsyncMock:
+        result_message = SimpleNamespace(chat_id=7, message_id=200)
+        request_message = SimpleNamespace(message_id=100)
+        make_delivery = AsyncMock()
+        db = SimpleNamespace(
+            get_delivery=AsyncMock(return_value=None),
+            make_delivery=make_delivery,
+        )
+        context = SimpleNamespace(
+            bot=SimpleNamespace(
+                send_message=AsyncMock(return_value=SimpleNamespace(message_id=201))
+            )
+        )
+
+        await _schedule_result_auto_delete(
+            context,
+            db,
+            result_message,
+            {"auto_delete": {"enabled": True, "seconds": 30}},
+            request_message=request_message,
+        )
+        return make_delivery
+
+    make_delivery = asyncio.run(run_case())
+    make_delivery.assert_awaited_once()
+    assert make_delivery.await_args.args[:3] == (7, 200, 201)
+    assert make_delivery.await_args.kwargs["request_message_id"] == 100
+
+
 
 def test_channel_search_requires_enabled_toggle_and_bot_admin(monkeypatch) -> None:
     async def run_case(enabled: bool, bot_status: str) -> AsyncMock:
@@ -835,6 +866,7 @@ def test_channel_search_uses_chat_state_without_a_user(monkeypatch) -> None:
     search_data = send_results.await_args.kwargs["search_data"]
     assert search_data["last_search"] == "KGF"
     assert search_data["search_requested_by"] == "Movies"
+    assert send_results.await_args.kwargs["request_message"] is None
     assert user_data == {}
     record_request.assert_not_awaited()
     send_results.assert_awaited_once()
@@ -999,3 +1031,30 @@ def test_anonymous_group_search_does_not_register_pseudobot(monkeypatch) -> None
     record_request.assert_not_awaited()
     assert send_results.await_args.kwargs["search_data"]["search_requested_by"] == "Movies"
     assert user_data == {}
+
+
+def test_private_search_passes_user_request_message_for_auto_delete(monkeypatch) -> None:
+    async def run_case() -> tuple[AsyncMock, object]:
+        user = SimpleNamespace(id=7, first_name="User", last_name=None, username=None)
+        message = SimpleNamespace(message_id=123, text="Movie")
+        chat = SimpleNamespace(type=ChatType.PRIVATE)
+        update = SimpleNamespace(
+            effective_user=user,
+            effective_message=message,
+            effective_chat=chat,
+        )
+        context = SimpleNamespace(user_data={})
+        db = SimpleNamespace(
+            register_member=AsyncMock(),
+            record_request=AsyncMock(),
+            get_settings=AsyncMock(return_value={"fuzzy_search_enabled": True}),
+            search_movies=AsyncMock(return_value=[]),
+        )
+        send_results = AsyncMock()
+        monkeypatch.setattr("bot.handlers._send_results", send_results)
+
+        await _run_search(update, context, db, "Movie")
+        return send_results, message
+
+    send_results, message = asyncio.run(run_case())
+    assert send_results.await_args.kwargs["request_message"] is message

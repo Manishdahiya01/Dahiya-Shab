@@ -26,7 +26,7 @@ The ZIP contains **18 files**:
 - Bot Groups records groups the bot joins and offers a confirmed Leave action. Duplicate Files identifies repeated Telegram file IDs and removes only an index entry after confirmation.
 - Index Sources includes a refreshable progress view for historical scans. Scans bulk-write up to 500 messages at a time and save a resume checkpoint after each batch. A pause saves the current partial batch; after an unexpected restart, at most one uncheckpointed batch may be scanned again, with duplicate source/message records kept safe by the database's unique key.
 - Bot profile image/description, editable/resettable/clearable welcome message, welcome URL button, custom reply buttons, and not-found message/URL button can be managed in Settings.
-- Auto-delete can be switched on/off, set to 30 seconds, 2 minutes, 5 minutes, or a custom time. A live countdown starts when results are sent; pending deletion timers are stored in MongoDB.
+- Auto-delete can be switched on/off, set to 30 seconds, 2 minutes, 5 minutes, or a custom time. A live countdown starts when results are sent; pending deletion timers are stored in MongoDB. When enabled, the original search request and the bot's result/file are scheduled for deletion together. In groups, the bot needs permission to delete user messages.
 - Force-subscription can be switched on/off; channels can be added and removed.
 - Database Cleanup removes only indexed file/video records and historical scan checkpoints after admin confirmation. It does not delete Telegram source files, registered sources, settings, members, or subscription links.
 - New channel posts are indexed when new indexing is enabled.

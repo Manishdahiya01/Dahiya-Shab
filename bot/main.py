@@ -42,6 +42,25 @@ async def deletion_worker(db: Database, bot: Any, shutdown: asyncio.Event) -> No
                 except TelegramError:
                     logger.exception("Auto-delete failed for message %s.", message_id)
                     continue
+                request_message_id = delivery.get("request_message_id")
+                if request_message_id is not None:
+                    try:
+                        await bot.delete_message(
+                            chat_id=chat_id,
+                            message_id=request_message_id,
+                        )
+                    except BadRequest as exc:
+                        if "message to delete not found" not in str(exc).lower():
+                            logger.warning(
+                                "Could not delete timed request message %s: %s",
+                                request_message_id,
+                                exc,
+                            )
+                    except TelegramError:
+                        logger.exception(
+                            "Auto-delete failed for request message %s.",
+                            request_message_id,
+                        )
                 status_id = delivery.get("status_message_id")
                 if status_id:
                     try:

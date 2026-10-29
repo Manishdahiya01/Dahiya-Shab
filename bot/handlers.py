@@ -306,6 +306,7 @@ async def _schedule_result_auto_delete(
     db: Database,
     message: Any,
     settings: dict[str, Any],
+    request_message: Any | None = None,
 ) -> None:
     auto_delete = settings.get("auto_delete", {})
     if not auto_delete.get("enabled") or not message:
@@ -335,6 +336,7 @@ async def _schedule_result_auto_delete(
         message.message_id,
         status_id,
         utc_now() + timedelta(seconds=seconds),
+        request_message_id=getattr(request_message, "message_id", None),
     )
 
 
@@ -344,6 +346,7 @@ async def _send_results(
     db: Database,
     page: int = 0,
     search_data: dict[str, Any] | None = None,
+    request_message: Any | None = None,
 ) -> None:
     if search_data is None:
         search_data = _search_state(update, context)
@@ -388,7 +391,13 @@ async def _send_results(
                 message,
                 reply_markup=_not_found_keyboard(settings),
             )
-        await _schedule_result_auto_delete(context, db, result_message, settings)
+        await _schedule_result_auto_delete(
+            context,
+            db,
+            result_message,
+            settings,
+            request_message=request_message,
+        )
         return
 
     query = search_data.get("last_search", "")
@@ -438,7 +447,13 @@ async def _send_results(
         states[str(result_message.message_id)] = search_data
         while len(states) > 100:
             states.pop(next(iter(states)))
-    await _schedule_result_auto_delete(context, db, result_message, settings)
+    await _schedule_result_auto_delete(
+        context,
+        db,
+        result_message,
+        settings,
+        request_message=request_message,
+    )
 
 
 def _result_header(
@@ -492,7 +507,19 @@ async def _run_search(update: Update, context: ContextTypes.DEFAULT_TYPE, db: Da
     search_data["search_filters"] = {}
     search_data["search_requested_by"] = requested_by
     search_data["search_elapsed_seconds"] = time.perf_counter() - started
-    await _send_results(update, context, db, search_data=search_data)
+    chat = getattr(update, "effective_chat", None)
+    request_message = (
+        message
+        if message and (not chat or chat.type != ChatType.CHANNEL)
+        else None
+    )
+    await _send_results(
+        update,
+        context,
+        db,
+        search_data=search_data,
+        request_message=request_message,
+    )
 
 
 async def _broadcast(db: Database, context: ContextTypes.DEFAULT_TYPE, text: str, url: str | None) -> tuple[int, int]:
@@ -1814,7 +1841,18 @@ async def _deliver_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, db:
             status_message = await update.effective_message.reply_text(
                 f"Auto-delete in {seconds} seconds."
             )
-            await db.make_delivery(chat_id, copied.message_id, status_message.message_id, expires)
+            request_message = (
+                update.effective_message
+                if not getattr(update, "callback_query", None)
+                else None
+            )
+            await db.make_delivery(
+                chat_id,
+                copied.message_id,
+                status_message.message_id,
+                expires,
+                request_message_id=getattr(request_message, "message_id", None),
+            )
     except TelegramError:
         logger.exception("Bot API could not copy indexed message %s.", item.get("file_key"))
         url = _source_link(item)
