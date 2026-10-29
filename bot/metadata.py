@@ -8,7 +8,7 @@ _QUALITY = re.compile(r"\b(2160p|1440p|1080p|720p|480p|360p|4k|uhd|hd)\b", re.I)
 _SEASON = re.compile(r"\bseason\s*[-._ ]?(\d{1,2})\b|\bS(\d{1,2})(?=E\d{1,3}\b|\b)", re.I)
 _EPISODE = re.compile(r"\b(?:episode|ep|e)\s*[-._ ]?(\d{1,3})\b|\bS\d{1,2}E(\d{1,3})\b", re.I)
 _LANGUAGES = (
-    "Hindi", "English", "Tamil", "Telugu", "Malayalam", "Kannada", "Bengali",
+    "Hindi", "Hind", "English", "Eng", "Tamil", "Telugu", "Malayalam", "Kannada", "Bengali",
     "Marathi", "Punjabi", "Korean", "Japanese", "Chinese", "Spanish", "French",
     "Dual Audio", "Multi Audio",
 )
